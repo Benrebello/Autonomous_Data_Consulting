@@ -2,10 +2,6 @@
 
 Uma aplicação web baseada em agentes de IA autônomos para análise exploratória de dados (EDA). Permite que usuários façam upload de arquivos CSV e conversem com uma equipe de agentes especializados para extrair insights, gerar gráficos e obter conclusões acionáveis sobre os dados.
 
-## Demonstração
-
-<video src="agente.mp4" controls></video>
-
 ## Sumário
 
 - [Funcionalidades](#funcionalidades)
@@ -353,10 +349,6 @@ Desenvolvido por Benjamin Rebello como parte do desafio individual do curso I2A2
 # Autonomous Data Consulting
 
 A web application based on autonomous AI agents for exploratory data analysis (EDA). It allows users to upload CSV files and converse with a team of specialized agents to extract insights, generate graphs, and obtain actionable conclusions about the data.
-
-## Demonstration
-
-<video src="agente.mp4" controls></video>
 
 ## Table of Contents
 

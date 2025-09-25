@@ -1,6 +1,10 @@
 # Consultoria de Dados Autônoma
 
-Uma aplicação web baseada em agentes de IA autônomos para análise exploratória de dados (EDA). Permite que usuários façam upload de arquivos  `CSV`, `XLSX`, `XLS` (legacy), `ODS` e `ODT` (tabelas extraídas como DataFrames) e conversem com uma equipe de agentes especializados para extrair insights, gerar gráficos e obter conclusões acionáveis sobre os dados.
+Uma aplicação web baseada em agentes de IA autônomos para análise exploratória de dados (EDA). Permite que usuários façam upload de arquivos CSV e conversem com uma equipe de agentes especializados para extrair insights, gerar gráficos e obter conclusões acionáveis sobre os dados.
+
+## Demonstração
+
+<video src="agente.mp4" controls></video>
 
 ## Sumário
 
@@ -223,8 +227,8 @@ flowchart TD
 ### Passos
 1. Clone o repositório:
    ```bash
-   git clone https://github.com/Benrebello/Autonomous_Data_Consulting
-   cd Autonomous_Data_consulting
+   git clone <url-do-repositorio>
+   cd consultoria-dados-autonoma
    ```
 
 2. Instale as dependências:
@@ -261,44 +265,6 @@ flowchart TD
 5. Digite sua pergunta no chat, por exemplo: "Faça uma EDA completa do dataset" ou "Quais são os outliers na coluna 'preço'?".
 6. Visualize o plano, o progresso das tarefas, gráficos e a resposta final com conclusões.
 7. Faça o download do relatório em PDF (ABNT + Pirâmide de Minto) pelo botão exibido após a resposta.
-
----
-
-## English (Quick Overview)
-
-This project is a Streamlit-based autonomous multi-agent app for EDA (Exploratory Data Analysis). Upload datasets (CSV, XLSX, XLS, ODS, ODT tables), configure joins, and chat with a team of AI agents to get insights, charts, and a final report.
-
-### Key Features
-- Multi-agent orchestration (Orchestrator, Team Leader, Data Architect, Technical/Business Analysts, Data Scientist).
-- File uploads: CSV, XLSX, legacy XLS, ODS, and ODT (tables extracted to DataFrames).
-- Optional column normalization (snake_case ASCII) to stabilize joins and plots.
-- Default DataFrame selection and join configuration UI (same/different keys, join types).
-- Dataset preview (headers, 4-row sample, dtypes, key candidates by uniqueness).
-- Charts rendered in-memory with per-chart download.
-- PDF export (ABNT-like formatting + Minto Pyramid structure).
-- Robust JSON and plan normalization to handle model variations.
-
-### Installation
-```bash
-pip install -r requirements.txt
-```
-Notes: XLS requires `xlrd`; PDF generation uses `reportlab` (both included in requirements).
-
-### Usage
-```bash
-streamlit run app.py
-```
-1) Upload datasets in the sidebar and (optionally) normalize column names.
-2) Select the default DataFrame, configure relationships/joins, and test the join.
-3) Ask your question in chat (e.g., "Run a complete EDA").
-4) Review the execution plan, results, and charts; download the generated PDF report.
-
-### Exemplos de Perguntas
-- "Quais são os tipos de dados das colunas?"
-- "Gere um histograma para a variável 'idade'."
-- "Detecte outliers na coluna 'salário' usando IQR."
-- "Qual a correlação entre 'vendas' e 'publicidade'?"
-- "Faça uma análise de clusters nos dados."
 
 ## Estrutura do Projeto
 
@@ -371,7 +337,7 @@ consultoria-dados-autonoma/
 
 ## Autor
 
-Desenvolvido por [Seu Nome] como parte do desafio individual do curso I2A2.
+Desenvolvido por Benjamin Rebello como parte do desafio individual do curso I2A2.
 
 ## Notas
 
@@ -604,4 +570,139 @@ flowchart TD
     U --> R
     U --> S
 ```
+
+## Installation
+
+### Prerequisites
+- Python 3.8+
+- Account with LLM provider (Groq, OpenAI, or Google Gemini) with API key.
+
+### Steps
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/Benrebello/Autonomous_Data_Consulting
+   cd Autonomous_Data_Consulting
+   ```
+
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+   Note: `.xls` (legacy Excel) support requires `xlrd`, already included in `requirements.txt`. PDF uses `reportlab` (also included).
+
+3. Configure LLM in `config.json`:
+   ```json
+   {
+     "provider": "groq",
+     "model": "llama-3.1-8b-instant",
+     "api_key": "your_api_key_here"
+   }
+   ```
+
+4. Run the application:
+   ```bash
+   streamlit run app.py
+   ```
+
+## Usage
+
+1. Open the application in the browser.
+2. Upload one or more files (`CSV`, `XLSX`, `XLS`, `ODS`, `ODT`).
+3. In the sidebar:
+   - Enable "Normalize column names (snake_case)" (recommended).
+   - Select the **Default DataFrame**.
+   - If there are 2+ datasets, check if they are **related** and define the **keys** (same or different) and **join type**.
+   - Optionally, click **Test Join** to see a preview.
+4. Open the **Default DataFrame Preview** expander to see header, 4 sample rows, types, and candidate keys.
+5. Type your question in chat, for example: "Perform a complete EDA on the dataset" or "What are the outliers in the 'price' column?".
+6. View the plan, task progress, charts, and final response with conclusions.
+7. Download the PDF report (ABNT + Minto Pyramid) via the button displayed after the response.
+
+### Example Questions
+- "What are the data types of the columns?"
+- "Generate a histogram for the 'age' variable."
+- "Detect outliers in the 'salary' column using IQR."
+- "What is the correlation between 'sales' and 'advertising'?"
+- "Perform cluster analysis on the data."
+
+## Project Structure
+
+```
+autonomous-data-consulting/
+├── app.py                 # Main Streamlit application
+├── agents.py              # Agent definitions
+├── tools.py               # Specialized tools
+├── prompts.py             # Prompt templates
+├── config.py              # LLM configuration
+├── config.json            # Configuration file
+├── requirements.txt       # Dependencies
+└── README.md              # This file
+```
+
+## Dependencies
+
+- streamlit: Web interface
+- pandas: Data manipulation
+- langchain, langchain-groq, langchain-openai, langchain-google-genai: LLM integration
+- matplotlib, seaborn: Visualizations
+- scikit-learn: Machine learning (clusters, outliers)
+- openpyxl, odfpy, xlrd: Excel/ODS/Legacy Excel support
+- reportlab: PDF report generation
+- python-dotenv: Environment variables
+- pydantic: Data modeling
+
+## Contribution
+
+1. Fork the project.
+2. Create a branch for your feature (`git checkout -b feature/new-tool`).
+3. Commit your changes (`git commit -m 'Add new tool'`).
+4. Push to the branch (`git push origin feature/new-tool`).
+5. Open a Pull Request.
+
+## Troubleshooting
+
+- **API key or model unavailable**
+  - Verify the key is entered correctly in the sidebar or `config.json`.
+  - If you see a `model_decommissioned` error, switch to `llama-3.1-8b-instant` in `config.json` or UI.
+
+- **Error reading Excel/ODS/ODT files**
+  - `XLSX`: requires `openpyxl` (already included).
+  - `XLS` (legacy): requires `xlrd` (already included). If missing, install: `pip install xlrd`.
+  - `ODS`: requires `odfpy` (already included). If missing, install: `pip install odfpy`.
+  - `ODT`: only documents with tables are supported. Each table is converted to a DataFrame. If no tables, a warning will be displayed.
+
+- **Column names with accents/spaces**
+  - Enable the "Normalize column names (snake_case)" option in the sidebar to avoid errors in joins and graphs.
+
+- **Joins with few results or duplicate columns**
+  - Use the "Are the datasets related?" panel to choose appropriate keys and join type (`inner/left/right/outer`).
+  - Use the "Test Join" button to preview the union before executing the plan and check for duplicate columns (`_x`, `_y`).
+
+- **JSON plan outside schema (without `execution_plan`)**
+  - Prompts were hardened for strict JSON and the app normalizes variations automatically (e.g., `tasks`, `execution_plan`, `project`). If it still fails, a minimal plan is generated to maintain flow.
+
+- **Token limit errors (TPM) on Groq / 413**
+  - Context sent for synthesis is compacted (small samples, string truncation). If necessary, switch to a lighter model (e.g., `llama-3.1-8b-instant`) and reduce very large datasets.
+
+- **Charts not appearing**
+  - Verify numeric columns exist. The system selects the first numeric column by default for histograms/boxplots.
+  - Charts are now rendered from bytes in memory; each chart includes a download button. There is a maintenance button to remove old `plot_*.png` files.
+
+- **JSON errors from LLM**
+  - Responses are cleaned of markdown blocks and validated. If the error persists, revise the prompt or try again; the application will display clear messages about invalid content.
+
+- **Fragmented text streaming in chat**
+  - The application aggregates chunks and presents a single smooth message. If you notice strange breaks, reload the page to reset the state.
+
+## Author
+
+Developed by Benjamin Rebello as part of the individual challenge for the I2A2 course.
+
+## Notes
+
+- The system uses session state memory to store conclusions from previous analyses.
+- For LLM providers, ensure the API key has adequate permissions.
+- In case of errors, check Streamlit logs and configuration files.
+- ODT: only documents with **tables** are supported (each table is converted to a DataFrame).
 

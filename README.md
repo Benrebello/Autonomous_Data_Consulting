@@ -2,10 +2,6 @@
 
 Uma aplicação web baseada em agentes de IA autônomos para análise exploratória de dados (EDA). Permite que usuários façam upload de arquivos  `CSV`, `XLSX`, `XLS` (legacy), `ODS` e `ODT` (tabelas extraídas como DataFrames) e conversem com uma equipe de agentes especializados para extrair insights, gerar gráficos e obter conclusões acionáveis sobre os dados.
 
-## Demonstração
-
-<video src="agente.mp4" controls></video>
-
 ## Sumário
 
 - [Funcionalidades](#funcionalidades)

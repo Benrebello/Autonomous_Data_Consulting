@@ -1,6 +1,6 @@
 # Consultoria de Dados Autônoma
 
-Uma aplicação web baseada em agentes de IA autônomos para análise exploratória de dados (EDA). Permite que usuários façam upload de arquivos CSV e conversem com uma equipe de agentes especializados para extrair insights, gerar gráficos e obter conclusões acionáveis sobre os dados.
+Uma aplicação web baseada em agentes de IA autônomos para análise exploratória de dados (EDA). Permite que usuários façam upload de arquivos  `CSV`, `XLSX`, `XLS` (legacy), `ODS` e `ODT` (tabelas extraídas como DataFrames) e conversem com uma equipe de agentes especializados para extrair insights, gerar gráficos e obter conclusões acionáveis sobre os dados.
 
 ## Demonstração
 

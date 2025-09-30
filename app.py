@@ -199,6 +199,26 @@ class AnalysisPipeline:
             "perform_survival_analysis": tools.perform_survival_analysis,
             "topic_modeling": tools.topic_modeling,
             "perform_bayesian_inference": tools.perform_bayesian_inference,
+            "sort_dataframe": tools.sort_dataframe,
+            "group_and_aggregate": tools.group_and_aggregate,
+            "create_pivot_table": tools.create_pivot_table,
+            "remove_duplicates": tools.remove_duplicates,
+            "fill_missing_with_median": tools.fill_missing_with_median,
+            "detect_and_remove_outliers": tools.detect_and_remove_outliers,
+            "calculate_skewness_kurtosis": tools.calculate_skewness_kurtosis,
+            "perform_multiple_regression": tools.perform_multiple_regression,
+            "cluster_with_kmeans": tools.cluster_with_kmeans,
+            "calculate_growth_rate": tools.calculate_growth_rate,
+            "perform_abc_analysis": tools.perform_abc_analysis,
+            "forecast_time_series_arima": tools.forecast_time_series_arima,
+            "risk_assessment": tools.risk_assessment,
+            "sensitivity_analysis": tools.sensitivity_analysis,
+            "monte_carlo_simulation": tools.monte_carlo_simulation,
+            "validate_and_correct_data_types": tools.validate_and_correct_data_types,
+            "perform_causal_inference": tools.perform_causal_inference,
+            "perform_named_entity_recognition": tools.perform_named_entity_recognition,
+            "text_summarization": tools.text_summarization,
+            "add_time_features_from_seconds": tools.add_time_features_from_seconds,
         }
 
         # Memória para armazenar conclusões anteriores
@@ -233,7 +253,7 @@ class AnalysisPipeline:
                     compact[key] = val if not isinstance(val, str) else self._truncate_str(val, 1500)
                 elif isinstance(val, dict):
                     # For dicts, keep shallow keys and truncate string values
-                    compact[key] = {k: (self._truncate_str(v, 800) if isinstance(v, str) else v)
+                    compact[key] = {str(k): (self._truncate_str(v, 800) if isinstance(v, str) else v)
                                     for k, v in list(val.items())[:50]}
                 else:
                     # Fallback to string representation truncated
@@ -271,59 +291,49 @@ class AnalysisPipeline:
                 resolved_inputs[key] = self.dataframes[value]
             else:
                 resolved_inputs[key] = value
+        # Sanitização de DataFrame "impresso" como string
+        try:
+            self._set_default_context()
+            df_default = self.shared_context.get('df_default')
+            for k, v in list(resolved_inputs.items()):
+                if isinstance(v, str) and len(v) > 200 and ('\n' in v or '... ' in v):
+                    # Heurística: parece uma impressão de DataFrame. Substituir por df_default.
+                    if isinstance(df_default, pd.DataFrame) and not df_default.empty:
+                        resolved_inputs[k] = df_default
+        
+            # Validação de colunas comuns
+            df_for_validation = None
+            # Encontrar df nos inputs
+            for cand_key in ['df', 'df1', 'df2', 'X']:
+                if isinstance(resolved_inputs.get(cand_key), pd.DataFrame):
+                    df_for_validation = resolved_inputs[cand_key]
+                    break
+            if isinstance(df_for_validation, pd.DataFrame):
+                cols = set(df_for_validation.columns)
+                for col_key in ['column', 'x_column', 'y_column', 'time_column', 'event_column']:
+                    val = resolved_inputs.get(col_key)
+                    if isinstance(val, str) and val not in cols:
+                        # Tentar fallback
+                        num_cols = list(df_for_validation.select_dtypes(include=['number']).columns)
+                        fallback = num_cols[0] if num_cols else (df_for_validation.columns[0] if len(df_for_validation.columns)>0 else None)
+                        if fallback:
+                            resolved_inputs[col_key] = fallback
+                        else:
+                            raise ValueError(f"Coluna '{val}' não encontrada no DataFrame para parâmetro '{col_key}'.")
+                # Listas de colunas
+                if isinstance(resolved_inputs.get('columns'), list):
+                    resolved_inputs['columns'] = [c for c in resolved_inputs['columns'] if c in cols]
+                    if not resolved_inputs['columns']:
+                        # fallback para primeiras 2 colunas numéricas
+                        num_cols = list(df_for_validation.select_dtypes(include=['number']).columns)
+                        resolved_inputs['columns'] = num_cols[:2] if len(num_cols) >= 2 else list(df_for_validation.columns[:2])
+        except Exception:
+            pass
         return resolved_inputs
 
-    def _fill_default_inputs_for_task(self, tool: str, inputs: dict) -> dict:
-        """Fill missing required inputs based on tool type using defaults."""
-        # Ensure defaults are available
-        self._set_default_context()
-        df_default = self.shared_context.get('df_default')
-        numeric_cols = self.shared_context.get('numeric_columns', [])
-        join_spec = st.session_state.get('join_spec')
-
-        # If already specified, just resolve placeholders like '@numeric_columns'
-        def replace_placeholders(val):
-            if isinstance(val, str) and val == '@df_default':
-                return df_default
-            if isinstance(val, str) and val == '@numeric_columns':
-                return numeric_cols
-            return val
-
-        inputs = {k: replace_placeholders(v) for k, v in inputs.items()}
-
-        # Heuristics per tool
-        if tool in {'join_datasets', 'join_datasets_on'}:
-            # Prefer user-provided join spec
-            keys = list(self.dataframes.keys())
-            if join_spec:
-                left_key = join_spec.get('left_df_key')
-                right_key = join_spec.get('right_df_key')
-                if left_key in self.dataframes and right_key in self.dataframes:
-                    inputs.setdefault('df1', self.dataframes[left_key])
-                    inputs.setdefault('df2', self.dataframes[right_key])
-                    if tool == 'join_datasets' and join_spec.get('left_on') == join_spec.get('right_on'):
-                        inputs.setdefault('on_column', join_spec.get('left_on'))
-                    else:
-                        inputs.setdefault('left_on', join_spec.get('left_on'))
-                        inputs.setdefault('right_on', join_spec.get('right_on'))
-                        inputs.setdefault('how', join_spec.get('how', 'inner'))
-                    return inputs
-            # Fallback inference
-            if len(self.dataframes) >= 2:
-                left_key, right_key = keys[0], keys[1]
-                df1 = self.dataframes[left_key]
-                df2 = self.dataframes[right_key]
-                common = [c for c in df1.columns if c in df2.columns]
-                inputs.setdefault('df1', df1)
-                inputs.setdefault('df2', df2)
-                if tool == 'join_datasets' and common:
-                    inputs.setdefault('on_column', common[0])
-                else:
-                    # choose first column from each as keys
-                    inputs.setdefault('left_on', df1.columns[0])
-                    inputs.setdefault('right_on', df2.columns[0])
-                    inputs.setdefault('how', 'inner')
-            return inputs
+    def _fill_default_inputs_for_task_join_helper(self, tool: str, inputs: dict) -> dict:
+        """Helper mantido por compatibilidade: delega para _fill_default_inputs_for_task."""
+        return self._fill_default_inputs_for_task(tool, inputs)
 
     def _fill_default_inputs_for_task(self, tool, inputs):
         """Fill default inputs for a task based on the tool."""
@@ -390,7 +400,16 @@ class AnalysisPipeline:
             else:
                 inputs = {'df': df_default, 'x_column': df_default.columns[0], 'y_column': df_default.columns[1] if len(df_default.columns) > 1 else df_default.columns[0]}
         elif tool == 'get_influential_variables':
-            target = 'class' if 'class' in df_default.columns else df_default.columns[-1]
+            # Prefer a numeric target to avoid conversion issues
+            target = None
+            if numeric_cols:
+                target = numeric_cols[-1]
+            else:
+                # Fallback to a column named 'class' if numeric, else last column
+                if 'class' in df_default.columns and pd.api.types.is_numeric_dtype(df_default['class']):
+                    target = 'class'
+                else:
+                    target = df_default.columns[-1]
             inputs = {'df': df_default, 'target_column': target}
         elif tool == 'perform_t_test':
             inputs = {'df': df_default, 'column': numeric_cols[0] if numeric_cols else df_default.columns[0], 'group_column': cat_cols[0] if cat_cols else df_default.columns[0]}
@@ -413,7 +432,8 @@ class AnalysisPipeline:
         elif tool == 'normalize_data':
             inputs = {'df': df_default, 'columns': numeric_cols}
         elif tool == 'impute_missing':
-            inputs = {'df': df_default, 'strategy': 'mean'}
+            # Use a safer default that works with mixed types
+            inputs = {'df': df_default, 'strategy': 'most_frequent'}
         elif tool == 'pca_dimensionality':
             inputs = {'df': df_default, 'n_components': 2}
         elif tool == 'decompose_time_series':
@@ -448,6 +468,35 @@ class AnalysisPipeline:
             x_col = x_col[0] if x_col else df_default.columns[0]
             y_col = numeric_cols[0] if numeric_cols else df_default.columns[1] if len(df_default.columns) > 1 else df_default.columns[0]
             inputs = {'df': df_default, 'x_column': x_col, 'y_column': y_col}
+        elif tool == 'join_datasets':
+            # Use same df and a categorical column as key if available
+            key = cat_cols[0] if cat_cols else df_default.columns[0]
+            inputs = {'df1': df_default, 'df2': df_default, 'on_column': key}
+        elif tool == 'join_datasets_on':
+            # Use same key on both sides
+            key = cat_cols[0] if cat_cols else df_default.columns[0]
+            inputs = {'df1': df_default, 'df2': df_default, 'left_on': key, 'right_on': key, 'how': 'inner'}
+        elif tool == 'sort_dataframe':
+            by_col = df_default.columns[0]
+            inputs = {'df': df_default, 'by': by_col, 'ascending': True}
+        elif tool == 'group_and_aggregate':
+            grp = cat_cols[0] if cat_cols else df_default.columns[0]
+            val = numeric_cols[0] if numeric_cols else df_default.columns[-1]
+            inputs = {'df': df_default, 'group_by': [grp], 'agg_dict': {val: 'mean'}}
+        elif tool == 'create_pivot_table':
+            idx = cat_cols[0] if cat_cols else df_default.columns[0]
+            cols = 'class' if 'class' in df_default.columns else (cat_cols[1] if len(cat_cols) > 1 else idx)
+            vals = numeric_cols[0] if numeric_cols else df_default.columns[-1]
+            inputs = {'df': df_default, 'index': idx, 'columns': cols, 'values': vals, 'aggfunc': 'mean'}
+        elif tool == 'fill_missing_with_median':
+            cols = numeric_cols if numeric_cols else []
+            inputs = {'df': df_default, 'columns': cols}
+        elif tool == 'detect_and_remove_outliers':
+            col = numeric_cols[0] if numeric_cols else df_default.columns[0]
+            inputs = {'df': df_default, 'column': col, 'method': 'iqr', 'threshold': 1.5}
+        elif tool == 'calculate_skewness_kurtosis':
+            cols = numeric_cols if numeric_cols else []
+            inputs = {'df': df_default, 'columns': cols}
         elif tool == 'plot_violin_plot':
             x_col = cat_cols[0] if cat_cols else df_default.columns[0]
             y_col = numeric_cols[0] if numeric_cols else df_default.columns[1] if len(df_default.columns) > 1 else df_default.columns[0]
@@ -466,6 +515,62 @@ class AnalysisPipeline:
             text_cols = df_default.select_dtypes(include=['object']).columns
             col = text_cols[0] if len(text_cols) > 0 else df_default.columns[0]
             inputs = {'df': df_default, 'text_column': col}
+        elif tool == 'perform_multiple_regression':
+            # Use numeric columns; ensure at least 2 predictors and 1 target
+            if len(numeric_cols) >= 2:
+                inputs = {'df': df_default, 'x_columns': numeric_cols[:-1], 'y_column': numeric_cols[-1]}
+            else:
+                inputs = {'df': df_default, 'x_columns': df_default.columns[:-1].tolist(), 'y_column': df_default.columns[-1]}
+        elif tool == 'cluster_with_kmeans':
+            cols = numeric_cols[:2] if len(numeric_cols) >= 2 else list(df_default.columns[:2])
+            inputs = {'df': df_default, 'columns': cols, 'n_clusters': 3}
+        elif tool == 'calculate_growth_rate':
+            time_col = 'time' if 'time' in df_default.columns else (df_default.columns[0])
+            val_col = numeric_cols[0] if numeric_cols else df_default.columns[0]
+            inputs = {'df': df_default, 'value_column': val_col, 'time_column': time_col}
+        elif tool == 'perform_abc_analysis':
+            val_col = numeric_cols[0] if numeric_cols else df_default.columns[0]
+            cat_col = cat_cols[0] if cat_cols else df_default.columns[0]
+            inputs = {'df': df_default, 'value_column': val_col, 'category_column': cat_col, 'a_threshold': 0.8, 'b_threshold': 0.95}
+        elif tool == 'forecast_time_series_arima':
+            col = numeric_cols[0] if numeric_cols else df_default.columns[0]
+            inputs = {'df': df_default, 'column': col, 'periods': 10}
+        elif tool == 'risk_assessment':
+            risk_factors = numeric_cols[:3] if len(numeric_cols) >= 1 else list(df_default.columns[:1])
+            inputs = {'df': df_default, 'risk_factors': risk_factors, 'weights': None}
+        elif tool == 'sensitivity_analysis':
+            # Provide a simple impact function
+            impact_fn = (lambda v: float(v))
+            variable_changes = {'var': [-0.1, 0.0, 0.1]}
+            inputs = {'base_value': 100.0, 'variable_changes': variable_changes, 'impact_function': impact_fn}
+        elif tool == 'monte_carlo_simulation':
+            variables = {
+                'x': {'type': 'normal', 'mean': 0, 'std': 1},
+                'y': {'type': 'uniform', 'low': -1, 'high': 1},
+            }
+            output_fn = (lambda vals: vals['x'] + vals['y'])
+            inputs = {'variables': variables, 'n_simulations': 100, 'output_function': output_fn}
+        elif tool == 'perform_causal_inference':
+            # Choose numeric treatment/outcome to ensure OLS works
+            num_cols = numeric_cols if numeric_cols else list(df_default.select_dtypes(include=['number']).columns)
+            if len(num_cols) >= 2:
+                outcome = num_cols[-1]
+                treatment = num_cols[0] if num_cols[0] != outcome else (num_cols[1] if len(num_cols) > 1 else num_cols[0])
+                controls = [c for c in num_cols if c not in {treatment, outcome}][:3]
+            else:
+                # Fallback: use first two columns assuming they are numeric-like
+                outcome = df_default.columns[-1]
+                treatment = df_default.columns[0]
+                controls = [c for c in df_default.columns if c not in {treatment, outcome}][:3]
+            inputs = {'df': df_default, 'treatment': treatment, 'outcome': outcome, 'controls': controls}
+        elif tool == 'perform_named_entity_recognition':
+            text_cols = df_default.select_dtypes(include=['object']).columns
+            col = text_cols[0] if len(text_cols) > 0 else df_default.columns[0]
+            inputs = {'df': df_default, 'text_column': col}
+        elif tool == 'text_summarization':
+            # Use a small synthetic text
+            sample_text = "This is a simple example. It demonstrates summarization. The function should return a concise text."
+            inputs = {'text': sample_text, 'max_sentences': 2}
         elif tool == 'plot_geospatial_map':
             lat_col = [c for c in df_default.columns if 'lat' in c.lower()]
             lon_col = [c for c in df_default.columns if 'lon' in c.lower() or 'lng' in c.lower()]
@@ -487,6 +592,10 @@ class AnalysisPipeline:
             inputs = {'df': df_default, 'text_column': col, 'num_topics': 5}
         elif tool == 'perform_bayesian_inference':
             inputs = {'df': df_default, 'column': numeric_cols[0] if numeric_cols else df_default.columns[0], 'prior_mean': 0, 'prior_std': 1}
+        elif tool == 'add_time_features_from_seconds':
+            # Prefer a column named 'time' if exists; fallback to first numeric
+            time_col = 'time' if 'time' in df_default.columns else (numeric_cols[0] if numeric_cols else df_default.columns[0])
+            inputs = {'df': df_default, 'time_column': time_col, 'origin': '2000-01-01'}
         else:
             # Fallback
             inputs = {'df': df_default}
@@ -799,57 +908,113 @@ class AnalysisPipeline:
             raise ValueError(f"'execution_plan' deve ser uma lista. Plano: {plan}")
         st.json(plan)
         
-        # Etapa 3: Execução do plano
+        # Etapa 3: Execução do plano (com paralelização segura)
         st.write("3. **Esquadrão de Dados:** Executando as tarefas...")
         # Reinicia a lista de gráficos desta execução para evitar paths antigos
         st.session_state.charts = []
         tasks = plan['execution_plan']
         completed_task_ids = set()
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time
+
+        def run_task(task):
+            """Worker sem chamadas de UI: executa a ferramenta e retorna (task_id, result, error, duration_s)."""
+            start = time.perf_counter()
+            try:
+                agent = self.agents[task['agent_responsible']]
+                tool = self.tool_mapping[task['tool_to_use']]
+                kwargs = self._resolve_inputs(task['inputs'])
+                result = agent.execute_task(tool, kwargs)
+                duration = time.perf_counter() - start
+                return task['task_id'], result, None, duration
+            except Exception as e:
+                duration = time.perf_counter() - start
+                return task['task_id'], None, e, duration
+
         while len(completed_task_ids) < len(tasks):
-            executed_this_round = False
-            for task in tasks:
-                if task['task_id'] in completed_task_ids:
-                    continue
-                deps = task.get('dependencies', [])
-                if all(dep in completed_task_ids for dep in deps):
-                    # Executar tarefa
-                    st.info(f"Executando Tarefa {task['task_id']}: {task['description']}")
-                    
-                    try:
-                        agent = self.agents[task['agent_responsible']]
-                        tool = self.tool_mapping[task['tool_to_use']]
-                        
-                        # Resolve os inputs, pegando resultados de tarefas anteriores se necessário
-                        kwargs = self._resolve_inputs(task['inputs'])
-                        
-                        # Executa a tarefa
-                        result = agent.execute_task(tool, kwargs)
-                        
-                        # Salva o resultado no contexto
-                        self.shared_context[task['output_variable']] = result
-                        st.success(f"Tarefa {task['task_id']} concluída.")
-                        
-                        completed_task_ids.add(task['task_id'])
-                        executed_this_round = True
-                    except Exception as e:
-                        st.error(f"Erro na Tarefa {task['task_id']}: {str(e)}")
-                        # Auto-correção: chamar TeamLeader para revisar plano
-                        error_briefing = briefing.copy()
-                        error_briefing['error'] = f"Tarefa {task['task_id']} falhou: {str(e)}. Revise o plano."
-                        try:
-                            revised_plan = self.team_leader.create_plan(error_briefing)
-                            st.warning("Plano revisado gerado devido a erro. Aplicando correção...")
-                            # Simplificado: adicionar tarefas revisadas ao plano (não implementado completamente)
-                            # Para simplicidade, pular tarefa e continuar
-                        except:
-                            st.error("Falha ao revisar plano. Pulando tarefa.")
-                        # Mesmo com erro, marcar como completada para evitar loop
-                        completed_task_ids.add(task['task_id'])
-                        executed_this_round = True
-                    break
-            if not executed_this_round:
+            # Seleciona tarefas prontas (dependências satisfeitas) e ainda não executadas
+            ready_tasks = [t for t in tasks if t['task_id'] not in completed_task_ids and all(d in completed_task_ids for d in t.get('dependencies', []))]
+            if not ready_tasks:
                 st.error("Erro: Dependências circulares ou tarefas não executáveis detectadas.")
                 break
+
+            # Configuração dinâmica de paralelismo e autosplit por RPM
+            user_parallel = int(st.session_state.get('max_parallel_tasks', 4))
+            max_parallel = user_parallel
+            # Adaptação dinâmica sob quota: reduzir paralelismo quando houver erro de quota recente
+            api_status = st.session_state.get('api_status', {})
+            if api_status.get('reason') == 'quota':
+                max_parallel = max(1, max_parallel // 2)
+            elif api_status.get('ok'):
+                # Reexpandir quando janela for liberada
+                max_parallel = user_parallel
+            rpm_cfg = int(st.session_state.get('rpm_limit', 10))
+            auto_split = bool(st.session_state.get('auto_split', True))
+
+            # Badge de alta demanda
+            if auto_split and len(ready_tasks) > rpm_cfg:
+                st.sidebar.info(f"⚠️ Alta demanda: {len(ready_tasks)} tarefas prontas > RPM {rpm_cfg}. Dividindo em lotes.")
+
+            # Número de tarefas a processar neste lote
+            if auto_split:
+                chunk_size = max(1, min(len(ready_tasks), max_parallel, rpm_cfg))
+            else:
+                chunk_size = max(1, min(len(ready_tasks), max_parallel))
+
+            batch_tasks = ready_tasks[:chunk_size]
+
+            # Executa em paralelo as tarefas do lote
+            max_workers = min(max_parallel, len(batch_tasks))
+            futures = {}
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                for t in batch_tasks:
+                    st.info(f"Executando Tarefa {t['task_id']}: {t['description']}")
+                    futures[executor.submit(run_task, t)] = t
+                for fut in as_completed(futures):
+                    t = futures[fut]
+                    task_id = t['task_id']
+                    result = None
+                    error = None
+                    try:
+                        task_id_ret, result, error, duration = fut.result()
+                    except Exception as e:
+                        error = e
+                        duration = None
+
+                    if error is None:
+                        # Atualiza contexto e UI no thread principal
+                        self.shared_context[t['output_variable']] = result
+                        if duration is not None:
+                            st.success(f"Tarefa {task_id} concluída. Tempo: {duration:.2f}s")
+                        else:
+                            st.success(f"Tarefa {task_id} concluída.")
+                        completed_task_ids.add(task_id)
+
+            # Determinar se o lote envolve chamadas de LLM (por ora, ferramentas são locais; mantenha lista vazia)
+            def _is_llm_tool(name: str) -> bool:
+                llm_tools = set()  # Placeholder para futuras ferramentas LLM-based
+                return name in llm_tools
+
+            llm_in_batch = any(_is_llm_tool(t['tool_to_use']) for t in batch_tasks)
+
+            # Se autosplit e houver LLM no lote, respeitar janela de RPM entre lotes (best-effort)
+            if auto_split and llm_in_batch and chunk_size >= rpm_cfg and rpm_cfg > 0:
+                import time as _t
+                wait_s = max(1, int(60 / rpm_cfg))
+                st.info(f"Aguardando {wait_s}s para respeitar o limite de {rpm_cfg} req/min antes do próximo lote (LLM)...")
+                _t.sleep(wait_s)
+
+            # Auto-correção: chamar TeamLeader para revisar plano (best-effort)
+            if error is not None:
+                error_briefing = briefing.copy()
+                error_briefing['error'] = f"Tarefa {task_id} falhou: {str(error)}. Revise o plano."
+                try:
+                    _ = self.team_leader.create_plan(error_briefing)
+                    st.warning("Plano revisado gerado devido a erro. Pulando tarefa com erro e seguindo.")
+                except Exception:
+                    st.error("Falha ao revisar plano. Pulando tarefa.")
+                completed_task_ids.add(task_id)
 
         # Etapa 4: Síntese e Resposta Final
         st.write("4. **Líder de Equipe:** Sintetizando resultados...")
@@ -900,24 +1065,76 @@ def main():
         st.header("LLM Settings")
         default_config = load_config()
         provider = st.selectbox("Provider", ["groq", "openai", "google"], index=["groq", "openai", "google"].index(default_config.get('provider', 'groq')))
-        model = st.text_input("Model", value=default_config.get('model', 'llama-3.1-8b-instant'))
-        api_key = st.text_input("API Key", value=default_config.get('api_key', ''), type="password")
+        
+        # Model options per provider
+        models = {
+            "google": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite"],
+            "openai": ["gpt-5", "gpt-5-nano", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"],
+            "groq": ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "meta-llama/llama-guard-4-12b", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "deepseek-r1-distill-llama-70b", "meta-llama/llama-4-maverick-17b-128e-instruct"]
+        }
+        model_options = models.get(provider, [])
+        default_model = default_config.get('model', model_options[0] if model_options else 'llama-3.1-8b-instant')
+        index = model_options.index(default_model) if default_model in model_options else 0
+        model = st.selectbox("Model", model_options, index=index)
+        
+        # Do NOT prefill API key from file for security; keep only in session during runtime
+        api_key = st.text_input("API Key", value=st.session_state.get('api_key', ''), type="password")
+        st.session_state['api_key'] = api_key
         if api_key == "your_api_key_here" or not api_key.strip():
             st.warning("Please configure a valid API key for the selected provider. The system will not work with the placeholder key.")
 
         rpm_limit = st.slider("Max Requests per Minute (RPM)", 1, 60, value=default_config.get('rpm_limit', 10))
         st.info(f"RPM Limit set to: {rpm_limit}")
+        # persist rpm in session for executor awareness
+        st.session_state['rpm_limit'] = rpm_limit
+
+        # API status indicator
+        if not api_key.strip():
+            st.error("API Key ausente. Informe sua chave para executar análises.")
+            st.session_state['api_status'] = {'ok': False, 'reason': 'missing_api_key'}
+        else:
+            st.success("API Key carregada para esta sessão.")
+            st.session_state['api_status'] = {'ok': True}
+
+        # Controls to optimize experience under high demand
+        st.subheader("Execução e Desempenho")
+        max_parallel = st.slider("Tarefas paralelas (máx)", 1, 8, value=st.session_state.get('max_parallel_tasks', 4))
+        st.session_state['max_parallel_tasks'] = max_parallel
+        auto_split = st.checkbox("Auto-dividir plano quando demanda alta (respeitar RPM)", value=st.session_state.get('auto_split', True))
+        st.session_state['auto_split'] = auto_split
+        # Quota/Rate-limit signaling
+        retry_at = st.session_state.get('retry_at')
+        if retry_at:
+            import time as _t
+            remaining = max(0, int(retry_at - _t.time()))
+            total_wait = int(st.session_state.get('wait_window_s', max(1, int(60 / max(1, st.session_state.get('rpm_limit', 10))))))
+            if remaining > 0:
+                st.warning(f"Aguardando janela de quota. Tente novamente em ~{remaining}s.")
+                # Progress visual
+                progress_val = 1 - (remaining / max(1, total_wait))
+                st.progress(min(max(progress_val, 0.0), 1.0))
+                # Botão de retentativa (só efetivo quando tempo zerar)
+                if st.button("Tentar novamente agora"):
+                    if remaining <= 0:
+                        st.session_state.pop('retry_at', None)
+                        st.session_state['api_status'] = {'ok': True}
+                        st.experimental_rerun()
+                    else:
+                        st.info("Ainda aguardando janela de quota.")
+            else:
+                # limpar quando passar
+                st.session_state.pop('retry_at', None)
 
         if st.button("Save Configurations"):
+            # Persist only non-sensitive settings; API key remains in session only
             config = {
                 'provider': provider,
                 'model': model,
-                'api_key': api_key,
                 'rpm_limit': rpm_limit
             }
             with open('config.json', 'w') as f:
                 json.dump(config, f, indent=4)
-            st.success("Configurations saved!")
+            st.success("Configurations (without API key) saved! API key is kept only for this session.")
 
     # File uploader
     uploaded_files = st.file_uploader("Upload your data", accept_multiple_files=True, type=['csv', 'xlsx', 'xls', 'ods', 'odt'])
@@ -931,22 +1148,42 @@ def main():
                 df = pd.read_csv(file)
                 if normalize_cols:
                     df = tools.normalize_dataframe_columns(df)
+                corrected_df, report = tools.validate_and_correct_data_types(df)
+                df = corrected_df
+                corrections = {k: v for k, v in report.items() if 'Converted' in v}
+                if corrections:
+                    st.info(f"Correções de tipos de dados para {file.name}: {corrections}")
                 dataframes[file.name] = df
             elif fname.endswith('.xlsx'):
                 df = pd.read_excel(file, engine='openpyxl')
                 if normalize_cols:
                     df = tools.normalize_dataframe_columns(df)
+                corrected_df, report = tools.validate_and_correct_data_types(df)
+                df = corrected_df
+                corrections = {k: v for k, v in report.items() if 'Converted' in v}
+                if corrections:
+                    st.info(f"Correções de tipos de dados para {file.name}: {corrections}")
                 dataframes[file.name] = df
             elif fname.endswith('.xls'):
                 # Requires xlrd
                 df = pd.read_excel(file, engine='xlrd')
                 if normalize_cols:
                     df = tools.normalize_dataframe_columns(df)
+                corrected_df, report = tools.validate_and_correct_data_types(df)
+                df = corrected_df
+                corrections = {k: v for k, v in report.items() if 'Converted' in v}
+                if corrections:
+                    st.info(f"Correções de tipos de dados para {file.name}: {corrections}")
                 dataframes[file.name] = df
             elif fname.endswith('.ods'):
                 df = pd.read_excel(file, engine='odf')
                 if normalize_cols:
                     df = tools.normalize_dataframe_columns(df)
+                corrected_df, report = tools.validate_and_correct_data_types(df)
+                df = corrected_df
+                corrections = {k: v for k, v in report.items() if 'Converted' in v}
+                if corrections:
+                    st.info(f"Correções de tipos de dados para {file.name}: {corrections}")
                 dataframes[file.name] = df
             elif fname.endswith('.odt'):
                 try:
@@ -955,6 +1192,11 @@ def main():
                         for tname, tdf in tables.items():
                             if normalize_cols:
                                 tdf = tools.normalize_dataframe_columns(tdf)
+                            corrected_tdf, report = tools.validate_and_correct_data_types(tdf)
+                            tdf = corrected_tdf
+                            corrections = {k: v for k, v in report.items() if 'Converted' in v}
+                            if corrections:
+                                st.info(f"Correções de tipos de dados para {file.name}::{tname}: {corrections}")
                             dataframes[f"{file.name}::{tname}"] = tdf
                     else:
                         st.warning(f"No tables found in {file.name}. ODT only supports tables.")
@@ -1071,16 +1313,38 @@ def main():
             st.write("No previous analysis stored.")
 
     if 'dataframes' in st.session_state and st.session_state.dataframes:
-        if prompt := st.chat_input("Describe the analysis you need (e.g., 'Perform a complete EDA on the dataset')..."):
+        if prompt := st.chat_input("Faça uma pergunta sobre seus dados (ex.: 'Execute uma EDA completa no dataset')..."):
             st.chat_message("user").markdown(prompt)
             
             config = {'provider': provider, 'model': model, 'api_key': api_key}
-            llm = obtain_llm(config)
-            
+            try:
+                llm = obtain_llm(config)
+            except Exception as e:
+                st.session_state['api_status'] = {'ok': False, 'reason': 'llm_init_error', 'error': str(e)}
+                st.error(f"Falha ao inicializar LLM: {e}")
+                st.stop()
+
             pipeline = AnalysisPipeline(llm, st.session_state.dataframes, rpm_limit)
             
             with st.chat_message("assistant"):
-                pipeline.run(prompt)
+                try:
+                    pipeline.run(prompt)
+                except Exception as e:
+                    msg = str(e).lower()
+                    import time as _t
+                    if any(k in msg for k in ["rate limit", "quota", "429", "exceeded", "too many requests"]):
+                        # Set retry after based on RPM (best-effort): wait window of 60/rpm seconds
+                        wait_s = max(1, int(60 / max(1, rpm_limit)))
+                        st.session_state['retry_at'] = _t.time() + wait_s
+                        st.session_state['wait_window_s'] = wait_s
+                        st.session_state['api_status'] = {'ok': False, 'reason': 'quota', 'wait_s': wait_s}
+                        st.warning(f"Cota/Rate limit atingido. Sugerimos reduzir tarefas paralelas e aguardar {wait_s}s antes de tentar novamente.")
+                        st.info("Dica: habilite 'Auto-dividir plano' e diminua 'Tarefas paralelas (máx)' na barra lateral.")
+                    elif any(k in msg for k in ["api key", "invalid key", "authentication"]):
+                        st.session_state['api_status'] = {'ok': False, 'reason': 'auth', 'error': str(e)}
+                        st.error("Problema de autenticação com a API Key. Verifique a chave informada.")
+                    else:
+                        st.error(f"Falha na execução: {e}")
 
         # Renders saved charts (bytes in memory or old paths)
                 if 'charts' in st.session_state and st.session_state.charts:

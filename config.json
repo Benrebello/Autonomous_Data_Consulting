@@ -1,5 +1,5 @@
 {
-  "provider": "groq",
-  "model": "llama-3.1-8b-instant",
-  "api_key": "your_api_key_here"
+    "provider": "google",
+    "model": "gemini-2.5-pro",
+    "rpm_limit": 60
 }

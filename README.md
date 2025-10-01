@@ -119,30 +119,30 @@ graph TD
     E --> R[Integração com LLMs: Groq, OpenAI, Gemini]
 
     S[config.json - Arquivo de configuração] --> E
-    V[plan_cache (session)] --> A
+    V[plan_cache - session] --> A
     T[requirements.txt - Dependências] --> U[streamlit, pandas, langchain, etc.]
 ```
 
 #### Diagrama de Processamento de Dados
 ```mermaid
 flowchart TD
-    A[Usuário faz upload de datasets] --> B[Pré-processamento: Normalização de colunas, Seleção de DataFrame padrão]
-    B --> C[Configuração de relacionamentos e junções: Chaves, tipo de junção, teste de junção]
-    C --> D[Usuário pergunta no chat]
-    D --> E[OrchestratorAgent: Briefing estrito em JSON + Validação Pydantic e auto-correção]
-    E --> F[TeamLeaderAgent: Plano de execução (JSON) + Validação Pydantic e auto-correção]
-    F --> G[Normalização do plano em app.py (variações como tarefas/plano_de_execução/projeto)]
-    G --> H[Expander: Seleção/Confirmação de colunas para tarefas de gráficos]
-    H --> I[Execução: Agentes chamam ferramentas; retry seletivo e reexecução em cascata se outputs mudarem]
+    A[Usuário faz upload de datasets] --> B[Pré-processamento]
+    B --> C[Configuração de relacionamentos]
+    C --> D[Usuário pergunta]
+    D --> E[OrchestratorAgent: Briefing em JSON]
+    E --> F[TeamLeaderAgent: Plano de execução]
+    F --> G[Normalização do plano em app.py]
+    G --> H[Expander: Seleção de colunas]
+    H --> I[Execução: Agentes chamam ferramentas]
     I --> J[Resultados no shared_context]
-    J --> K[TeamLeader sintetiza resultados (contexto compacto)]
-    K --> L[Revisão Crítica (QA): sugestões são incorporadas ao contexto]
-    L --> M[DataAnalystBusinessAgent: Resposta final com conclusões]
-    M --> N[Resposta armazenada na memória da sessão]
+    J --> K[TeamLeader sintetiza resultados]
+    K --> L[Revisão Crítica]
+    L --> M[DataAnalystBusinessAgent: Resposta final]
+    M --> N[Resposta armazenada na memória]
     N --> O[Gráficos em memória + download]
-    O --> P[PDF: ABNT + Pirâmide de Minto (lazy reportlab)]
-    P --> Q[Analytics: taxa por ferramenta, tempo médio, inputs de erro]
-    Q --> R[Logs: opcional salvar JSON em logs/]
+    O --> P[PDF: ABNT + Pirâmide de Minto]
+    P --> Q[Analytics: taxa por ferramenta]
+    Q --> R[Logs: opcional salvar JSON]
     R --> S[Fim do processamento]
 ```
 
@@ -471,30 +471,30 @@ graph TD
     E --> R[LLM Integration: Groq, OpenAI, Gemini]
 
     S[config.json - Configuration file] --> E
-    V[plan_cache (session)] --> A
     T[requirements.txt - Dependencies] --> U[streamlit, pandas, langchain, etc.]
+    V[plan_cache - session] --> A
 ```
 
 #### Data Processing Diagram
 ```mermaid
 flowchart TD
-    A[User uploads datasets] --> B[Preprocessing: Column normalization, Default DataFrame selection]
-    B --> C[Relationship and join configuration: Keys, join type, join test]
+    A[User uploads datasets] --> B[Preprocessing]
+    B --> C[Relationship and join configuration]
     C --> D[User asks question in chat]
-    D --> E[OrchestratorAgent: Strict JSON briefing + Pydantic validation and auto-correction]
-    E --> F[TeamLeaderAgent: Execution plan (JSON) + Pydantic validation and auto-correction]
-    F --> G[Plan normalization in app.py (variations like tasks/execution_plan/project)]
-    G --> H[Expander: Column selection/confirmation for chart tasks]
-    H --> I[Execution: Agents call tools; selective retry and cascading re-execution if outputs change]
+    D --> E[OrchestratorAgent: Strict JSON briefing]
+    E --> F[TeamLeaderAgent: Briefing plan JSON]
+    F --> G[Plan normalization in app.py]
+    G --> H[Expander: Column selection]
+    H --> I[Execution: Agents call tools]
     I --> J[Results stored in shared_context]
-    J --> K[Team Leader synthesizes results (compact context)]
-    K --> L[QA Review: suggestions incorporated into context]
-    L --> M[DataAnalystBusinessAgent: Final response with conclusions]
+    J --> K[Team Leader synthesizes results]
+    K --> L[QA Review]
+    L --> M[DataAnalystBusinessAgent]
     M --> N[Full response stored in session memory]
-    N --> O[In-memory charts + download]
-    O --> P[PDF: ABNT-like + Minto Pyramid (lazy reportlab)]
-    P --> Q[Analytics: success/error by tool, mean duration, frequent error inputs]
-    Q --> R[Logs: optional JSON save to logs/]
+    N --> O[In-memory charts and download]
+    O --> P[PDF: ABNT-like with Minto Pyramid]
+    P --> Q[Analytics: success/error by tool]
+    Q --> R[Logs: optional JSON save to logs]
     R --> S[End of processing]
 ```
 

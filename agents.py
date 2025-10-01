@@ -5,6 +5,11 @@ from langchain.prompts import PromptTemplate
 from langchain.schema import BaseOutputParser
 from pydantic import BaseModel, Field, ValidationError
 from typing import Dict, Any, List, Optional, Literal
+import sys
+from pathlib import Path
+
+# Ensure local module resolution for 'prompts.py' to avoid shadowing by similarly named external packages
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from prompts import (ORCHESTRATOR_PROMPT, TEAM_LEADER_PROMPT, 
                      SYNTHESIS_PROMPT, FINAL_RESPONSE_PROMPT)

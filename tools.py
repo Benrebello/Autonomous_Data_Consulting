@@ -18,7 +18,6 @@ from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
-from wordcloud import WordCloud
 import numpy as np
 from typing import Dict
 from odf.opendocument import load as odf_load
@@ -559,10 +558,15 @@ def select_features(df, target_column, k=10):
 
 def generate_wordcloud(df, text_column):
     """Generate wordcloud from text column."""
+    try:
+        from wordcloud import WordCloud
+    except Exception:
+        # Graceful fallback when optional dependency is missing
+        return None
     text = ' '.join(df[text_column].dropna().astype(str))
-    wordcloud = WordCloud(width=800, height=400).generate(text)
+    wc = WordCloud(width=800, height=400).generate(text)
     plt.figure(figsize=(10, 5))
-    plt.imshow(wordcloud, interpolation='bilinear')
+    plt.imshow(wc, interpolation='bilinear')
     plt.axis('off')
     buf = BytesIO()
     plt.savefig(buf, format='png')

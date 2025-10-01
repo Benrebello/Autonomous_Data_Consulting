@@ -240,6 +240,12 @@ class AnalysisPipeline:
         # Conversation log to persist all user messages (raw inputs)
         if 'conversation' not in st.session_state:
             st.session_state['conversation'] = []
+        # Unified chat-like history
+        if 'chat_history' not in st.session_state:
+            st.session_state['chat_history'] = []
+        # Collected reports generated during the process
+        if 'reports' not in st.session_state:
+            st.session_state['reports'] = []
         # Conversational context defaults
         for key, default in [
             ('clarify_pending', False),
@@ -1162,13 +1168,11 @@ class AnalysisPipeline:
                 }
                 st.session_state['intent_mode'] = 'simple_analysis'
                 st.session_state['last_tool'] = tool_name
-                
-                # Compor resposta curta e sem repetição
+                # Compose and show assistant response
                 composed = self._compose_response(topic=user_query, result=result, style=st.session_state.get('response_style', 'Padrão'))
                 with st.chat_message("assistant"):
                     st.markdown(composed)
-                    # Complementar com narrativa do analista de negócios
-                    # Criar síntese técnica do resultado
+                    # Build business narrative and full response
                     if isinstance(result, dict):
                         synthesis = f"Resultado da ferramenta {tool_name}: " + ", ".join([f"{k}: {v}" for k, v in result.items()])
                     else:
@@ -1178,13 +1182,17 @@ class AnalysisPipeline:
                     full_response = stream_response_to_chat(final_response_stream)
                     if isinstance(result, bytes):
                         st.image(result)
-                
-                # Armazenar resposta na memória (prefer original question if discovery happened)
+
+                # Persist in memory and unified chat history
                 display_question = st.session_state.get('first_user_query') or user_query
                 self.memory.append(f"**Pergunta:** {display_question}\n**Resposta:** {full_response}")
                 st.session_state['memory'] = self.memory
-                
-                # Gerar PDF simples
+                ch = st.session_state.get('chat_history', [])
+                ch.append({'role': 'assistant', 'text': composed})
+                ch.append({'role': 'assistant', 'text': full_response})
+                st.session_state['chat_history'] = ch
+
+                # Generate PDF and expose download + store report
                 charts_bytes = [result] if isinstance(result, bytes) else []
                 pdf = generate_pdf_report(
                     title=f"Análise: {tool_name}",
@@ -1200,6 +1208,11 @@ class AnalysisPipeline:
                     file_name=f"analise_{tool_name}.pdf",
                     mime="application/pdf",
                 )
+                st.session_state['reports'].append({
+                    'file_name': f"analise_{tool_name}.pdf",
+                    'bytes': pdf,
+                    'caption': f"Análise gerada para {tool_name}"
+                })
             else:
                 st.error(f"Ferramenta '{tool_name}' não encontrada.")
             return  # Sair sem executar o fluxo completo
@@ -1226,6 +1239,10 @@ class AnalysisPipeline:
             display_question = st.session_state.get('first_user_query') or user_query
             self.memory.append(f"**Pergunta:** {display_question}\n**Resposta:** {full_response}")
             st.session_state['memory'] = self.memory
+            # Append to unified chat history (assistant)
+            ch = st.session_state.get('chat_history', [])
+            ch.append({'role': 'assistant', 'text': full_response})
+            st.session_state['chat_history'] = ch
 
             # Gerar PDF simples
             charts_bytes = []
@@ -1243,6 +1260,12 @@ class AnalysisPipeline:
                 file_name="resumo_dados.pdf",
                 mime="application/pdf",
             )
+            # Store report for later download in history
+            st.session_state['reports'].append({
+                'file_name': "resumo_dados.pdf",
+                'bytes': pdf,
+                'caption': "Resumo de Dados"
+            })
 
             # Exibir resposta diretamente
             with st.chat_message("assistant"):
@@ -1807,6 +1830,21 @@ def main():
             st.success("API Key carregada para esta sessão.")
             st.session_state['api_status'] = {'ok': True}
 
+        # Initialize LLM once basic settings are available
+        try:
+            if st.session_state.get('api_status', {}).get('ok'):
+                runtime_config = {
+                    'provider': provider,
+                    'model': model,
+                    'api_key': api_key,
+                    'rpm_limit': rpm_limit,
+                }
+                llm = obtain_llm(runtime_config)
+                st.session_state['llm'] = llm
+                st.session_state['runtime_config'] = runtime_config
+        except Exception as e:
+            st.error(f"Falha ao inicializar LLM: {e}")
+
         # Controls to optimize experience under high demand
         st.subheader("Execução e Desempenho")
         max_parallel = st.slider("Tarefas paralelas (máx)", 1, 8, value=st.session_state.get('max_parallel_tasks', 4))
@@ -1842,13 +1880,13 @@ def main():
 
         if st.button("Save Configurations"):
             # Persist only non-sensitive settings; API key remains in session only
-            config = {
+            persist_cfg = {
                 'provider': provider,
                 'model': model,
                 'rpm_limit': rpm_limit
             }
             with open('config.json', 'w') as f:
-                json.dump(config, f, indent=4)
+                json.dump(persist_cfg, f, indent=4)
             st.success("Configurations (without API key) saved! API key is kept only for this session.")
 
     # File uploader
@@ -1918,7 +1956,6 @@ def main():
                 except Exception as e:
                     st.error(f"Failed to read {file.name} (ODT): {e}")
         st.session_state.dataframes = dataframes
-        st.write("Data loaded:", list(dataframes.keys()))
 
     # If there are dataframes, allow selecting the default
     default_df_key = None
@@ -2018,77 +2055,104 @@ def main():
                     except Exception as e:
                         st.error(f"Failed to test join: {e}")
 
-    # Display memory (complete responses)
-    with st.expander("Memory of Previous Analyses (complete responses)"):
-            try:
-                llm = obtain_llm(config)
-            except Exception as e:
-                st.session_state['api_status'] = {'ok': False, 'reason': 'llm_init_error', 'error': str(e)}
-                st.error(f"Falha ao inicializar LLM: {e}")
-                st.stop()
-
-            pipeline = AnalysisPipeline(llm, st.session_state.dataframes, rpm_limit)
-            
-            with st.chat_message("assistant"):
-                try:
-                    pipeline.run(prompt)
-                except Exception as e:
-                    msg = str(e).lower()
-                    import time as _t
-                    if any(k in msg for k in ["rate limit", "quota", "429", "exceeded", "too many requests"]):
-                        # Set retry after based on RPM (best-effort): wait window of 60/rpm seconds
-                        wait_s = max(1, int(60 / max(1, rpm_limit)))
-                        st.session_state['retry_at'] = _t.time() + wait_s
-                        st.session_state['wait_window_s'] = wait_s
-                        st.session_state['api_status'] = {'ok': False, 'reason': 'quota', 'wait_s': wait_s}
-                        st.warning(f"Cota/Rate limit atingido. Sugerimos reduzir tarefas paralelas e aguardar {wait_s}s antes de tentar novamente.")
-                        st.info("Dica: habilite 'Auto-dividir plano' e diminua 'Tarefas paralelas (máx)' na barra lateral.")
-                    elif any(k in msg for k in ["api key", "invalid key", "authentication"]):
-                        st.session_state['api_status'] = {'ok': False, 'reason': 'auth', 'error': str(e)}
-                        st.error("Problema de autenticação com a API Key. Verifique a chave informada.")
-                    else:
-                        st.error(f"Falha na execução: {e}")
-
-        # Renders saved charts (bytes in memory or old paths)
-                if 'charts' in st.session_state and st.session_state.charts:
-                    for idx, chart_item in enumerate(st.session_state.charts, start=1):
-                        if isinstance(chart_item, dict) and 'bytes' in chart_item:
-                            st.image(chart_item['bytes'], caption=chart_item.get('caption'))
-                            st.download_button(
-                                label=f"Download chart {idx}",
-                                data=chart_item['bytes'],
-                                file_name=f"chart_{idx}.png",
-                                mime="image/png",
-                            )
-                        else:
-                            # Legacy path: check existence before trying to render
-                            if isinstance(chart_item, str) and os.path.exists(chart_item):
-                                with open(chart_item, 'rb') as f:
-                                    img_bytes = f.read()
-                                st.image(img_bytes)
-                                st.download_button(
-                                    label=f"Download chart {idx}",
-                                    data=img_bytes,
-                                    file_name=os.path.basename(chart_item),
-                                    mime="image/png",
-                                )
-                            else:
-                                st.warning(f"Image not found (ignored): {chart_item}")
-                    del st.session_state.charts  # Clear for next execution
-
-    # Display conversation log (all user messages)
-    with st.expander("Conversation Log (all user messages)"):
-        conv = st.session_state.get('conversation', [])
-        if conv:
-            for i, msg in enumerate(conv, 1):
-                if isinstance(msg, dict):
-                    role = msg.get('role', 'user')
-                    text = msg.get('text', '')
-                    st.markdown(f"**{i}. [{role}]** {text}")
-                else:
-                    st.markdown(f"**{i}. [user]** {str(msg)}")
+    # Conversational Chat UI
+    ## st.subheader("Chat")
+    if st.session_state.get('api_status', {}).get('ok') and 'dataframes' in st.session_state and st.session_state.dataframes:
+        user_prompt = None
+        if hasattr(st, 'chat_input'):
+            user_prompt = st.chat_input("Faça sua pergunta sobre os dados...")
         else:
-            st.write("No user messages logged yet.")
+            # Fallback for older Streamlit versions
+            tmp = st.text_area("Sua pergunta", key="text_prompt", height=80)
+            if st.button("Enviar pergunta"):
+                user_prompt = tmp
+        if user_prompt:
+            # Render user message bubble
+            with st.chat_message("user"):
+                st.markdown(user_prompt)
+            # Persist raw user message
+            conv = st.session_state.get('conversation', [])
+            conv.append({'role': 'user', 'text': user_prompt})
+            st.session_state['conversation'] = conv
+            # Append to unified chat history (user)
+            ch = st.session_state.get('chat_history', [])
+            ch.append({'role': 'user', 'text': user_prompt})
+            st.session_state['chat_history'] = ch
+
+            try:
+                llm = st.session_state.get('llm')
+                if llm is None:
+                    # Fallback: initialize on demand
+                    runtime_config = {
+                        'provider': provider,
+                        'model': model,
+                        'api_key': st.session_state.get('api_key', ''),
+                        'rpm_limit': st.session_state.get('rpm_limit', 10),
+                    }
+                    llm = obtain_llm(runtime_config)
+                    st.session_state['llm'] = llm
+
+                pipeline = AnalysisPipeline(llm, st.session_state.dataframes, st.session_state.get('rpm_limit', 10))
+                pipeline.run(user_prompt)
+            except Exception as e:
+                st.error(f"Erro durante a conversa: {e}")
+    else:
+        st.info("Para usar o chat, configure uma API Key válida e carregue ao menos um dataset.")
+
+    # Unified conversation history (chat-like) with reports and charts
+    with st.expander("Conversation History"):
+        history = st.session_state.get('chat_history', [])
+        if history:
+            for msg in history:
+                role = msg.get('role', 'assistant')
+                text = msg.get('text', '')
+                with st.chat_message(role if role in ("user", "assistant") else "assistant"):
+                    st.markdown(text)
+        else:
+            st.write("No history yet.")
+
+        # Render any saved charts
+        if 'charts' in st.session_state and st.session_state.charts:
+            for idx, chart_item in enumerate(st.session_state.charts, start=1):
+                if isinstance(chart_item, dict) and 'bytes' in chart_item:
+                    st.image(chart_item['bytes'], caption=chart_item.get('caption'))
+                    st.download_button(
+                        label=f"Download chart {idx}",
+                        data=chart_item['bytes'],
+                        file_name=f"chart_{idx}.png",
+                        mime="image/png",
+                    )
+                else:
+                    # Legacy path: check existence before trying to render
+                    if isinstance(chart_item, str) and os.path.exists(chart_item):
+                        with open(chart_item, 'rb') as f:
+                            img_bytes = f.read()
+                        st.image(img_bytes)
+                        st.download_button(
+                            label=f"Download chart {idx}",
+                            data=img_bytes,
+                            file_name=os.path.basename(chart_item),
+                            mime="image/png",
+                        )
+                    else:
+                        st.warning(f"Image not found (ignored): {chart_item}")
+            del st.session_state.charts  # Clear for next execution
+
+        # Render downloadable reports
+        reports = st.session_state.get('reports', [])
+        if reports:
+            st.markdown("**Reports generated:**")
+            for i, rep in enumerate(reports, 1):
+                caption = rep.get('caption') or f"Report {i}"
+                st.download_button(
+                    label=f"Download {caption}",
+                    data=rep.get('bytes'),
+                    file_name=rep.get('file_name', f"report_{i}.pdf"),
+                    mime="application/pdf",
+                    key=f"rep_dl_{i}"
+                )
+        else:
+            st.write("No reports generated yet.")
 
 if __name__ == "__main__":
     main()

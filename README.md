@@ -58,6 +58,7 @@ O sistema é baseado em uma arquitetura modular com os seguintes componentes:
 - **DataAnalystTechnicalAgent**: Realiza análises estatísticas e EDA profundas.
 - **DataAnalystBusinessAgent**: Gera gráficos e insights de negócio.
 - **DataScientistAgent**: Aplica machine learning para clusters e previsões.
+- **QualityAssuranceAgent (QA Reviewer)**: Revisor crítico que avalia o rascunho técnico e aponta melhorias, limitações e possíveis vieses. Suas observações são incorporadas ao contexto da resposta final.
 
 ### Ferramentas
 - **Ferramentas de Engenharia**: `join_datasets`, `join_datasets_on`, `clean_data`.
@@ -461,6 +462,7 @@ The system is based on a modular architecture with the following components:
 - **DataAnalystTechnicalAgent**: Performs statistical and deep EDA analyses.
 - **DataAnalystBusinessAgent**: Generates graphs and business insights.
 - **DataScientistAgent**: Applies machine learning for clusters and predictions.
+- **QualityAssuranceAgent (QA Reviewer)**: Critical reviewer that inspects the technical draft, highlights limitations and communication improvements, and its notes are fed into the final response context.
 
 ### Tools
 - **Engineering Tools**: `join_datasets`, `join_datasets_on`, `clean_data`.

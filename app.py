@@ -237,6 +237,9 @@ class AnalysisPipeline:
         # Memória para armazenar conclusões anteriores
         if 'memory' not in st.session_state:
             st.session_state['memory'] = []
+        # Conversation log to persist all user messages (raw inputs)
+        if 'conversation' not in st.session_state:
+            st.session_state['conversation'] = []
         # Conversational context defaults
         for key, default in [
             ('clarify_pending', False),
@@ -261,6 +264,7 @@ class AnalysisPipeline:
         ]:
             st.session_state.setdefault(key, default)
         self.memory = st.session_state.get('memory')
+        self.conversation = st.session_state.get('conversation')
 
     def _truncate_str(self, s: str, max_len: int = 2000) -> str:
         if not isinstance(s, str):
@@ -439,7 +443,7 @@ class AnalysisPipeline:
     # =========================
     # Conversational Discovery
     # =========================
-    def _start_discovery(self):
+    def _start_discovery(self, initial_query: str | None = None):
         questions = [
             "Qual é o objetivo de negócio principal desta análise?",
             "Qual é a variável-alvo ou resultado que deseja entender/prever (se houver)?",
@@ -452,6 +456,9 @@ class AnalysisPipeline:
         st.session_state['discovery_answers'] = []
         st.session_state['discovery_summary'] = None
         st.session_state['discovery_confirm_pending'] = False
+        # Store the very first user query that kicked off discovery so we don't lose it (e.g., when user confirms with 'ok')
+        if initial_query:
+            st.session_state['first_user_query'] = initial_query
 
     def _ingest_discovery_answer(self, user_text: str):
         st.session_state['discovery_answers'].append(user_text)
@@ -472,7 +479,9 @@ class AnalysisPipeline:
         directives = {
             'discovery_summary': st.session_state.get('discovery_summary'),
         }
-        enriched_query = user_query + "\n\n[Discovery]: " + json.dumps(directives)
+        # Prefer the original first question captured at discovery start
+        base_query = st.session_state.get('first_user_query') or user_query
+        enriched_query = base_query + "\n\n[Discovery]: " + json.dumps(directives)
         briefing = self.orchestrator.run(enriched_query)
         return briefing
 
@@ -892,6 +901,12 @@ class AnalysisPipeline:
     def run(self, user_query: str):
         # Etapa 1: Orquestrador cria o briefing
         st.write("1. **Orquestrador:** Analisando sua solicitação...")
+        # Log the raw user message so it is always persisted, even during discovery loops
+        try:
+            self.conversation.append({"role": "user", "text": user_query})
+            st.session_state['conversation'] = self.conversation
+        except Exception:
+            pass
         # Status da fase
         phase = (
             "Descoberta" if st.session_state.get('discovery_active') else
@@ -1019,7 +1034,7 @@ class AnalysisPipeline:
                             return
                 elif not st.session_state.get('intent_mode'):
                     # Start discovery if nothing is mapped and no prior intent
-                    self._start_discovery()
+                    self._start_discovery(initial_query=user_query)
                     st.write("2. **Descoberta:**")
                     st.markdown(f"1. {st.session_state['discovery_questions'][0]}")
                     return
@@ -1164,8 +1179,9 @@ class AnalysisPipeline:
                     if isinstance(result, bytes):
                         st.image(result)
                 
-                # Armazenar resposta na memória
-                self.memory.append(f"**Pergunta:** {user_query}\n**Resposta:** {full_response}")
+                # Armazenar resposta na memória (prefer original question if discovery happened)
+                display_question = st.session_state.get('first_user_query') or user_query
+                self.memory.append(f"**Pergunta:** {display_question}\n**Resposta:** {full_response}")
                 st.session_state['memory'] = self.memory
                 
                 # Gerar PDF simples
@@ -1206,8 +1222,9 @@ class AnalysisPipeline:
                 synthesis_report = full_response
                 plan = {}
 
-            # Armazenar resposta na memória
-            self.memory.append(f"**Pergunta:** {user_query}\n**Resposta:** {full_response}")
+            # Armazenar resposta na memória (prefer original question if discovery happened)
+            display_question = st.session_state.get('first_user_query') or user_query
+            self.memory.append(f"**Pergunta:** {display_question}\n**Resposta:** {full_response}")
             st.session_state['memory'] = self.memory
 
             # Gerar PDF simples
@@ -1674,8 +1691,9 @@ class AnalysisPipeline:
         final_response_stream = self.agents["DataAnalystBusinessAgent"].generate_final_response(synthesis_report, memory_context)
         full_response = stream_response_to_chat(final_response_stream)
 
-        # Armazenar resposta completa na memória (sem truncar)
-        self.memory.append(f"**Pergunta:** {user_query}\n**Resposta:** {full_response}")
+        # Armazenar resposta completa na memória (sem truncar) preferindo a pergunta original
+        display_question = st.session_state.get('first_user_query') or user_query
+        self.memory.append(f"**Pergunta:** {display_question}\n**Resposta:** {full_response}")
         st.session_state['memory'] = self.memory
 
         # Botão para baixar relatório em PDF (ABNT + Pirâmide de Minto) - apenas se solicitado
@@ -2002,18 +2020,6 @@ def main():
 
     # Display memory (complete responses)
     with st.expander("Memory of Previous Analyses (complete responses)"):
-        if 'memory' in st.session_state and st.session_state['memory']:
-            for i, mem in enumerate(st.session_state['memory'], 1):
-                st.markdown(f"**{i}.**")
-                st.write(mem)
-        else:
-            st.write("No previous analysis stored.")
-
-    if 'dataframes' in st.session_state and st.session_state.dataframes:
-        if prompt := st.chat_input("Faça uma pergunta sobre seus dados (ex.: 'Execute uma EDA completa no dataset')..."):
-            st.chat_message("user").markdown(prompt)
-            
-            config = {'provider': provider, 'model': model, 'api_key': api_key}
             try:
                 llm = obtain_llm(config)
             except Exception as e:
@@ -2069,6 +2075,20 @@ def main():
                             else:
                                 st.warning(f"Image not found (ignored): {chart_item}")
                     del st.session_state.charts  # Clear for next execution
+
+    # Display conversation log (all user messages)
+    with st.expander("Conversation Log (all user messages)"):
+        conv = st.session_state.get('conversation', [])
+        if conv:
+            for i, msg in enumerate(conv, 1):
+                if isinstance(msg, dict):
+                    role = msg.get('role', 'user')
+                    text = msg.get('text', '')
+                    st.markdown(f"**{i}. [{role}]** {text}")
+                else:
+                    st.markdown(f"**{i}. [user]** {str(msg)}")
+        else:
+            st.write("No user messages logged yet.")
 
 if __name__ == "__main__":
     main()

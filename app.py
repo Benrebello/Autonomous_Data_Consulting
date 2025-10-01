@@ -1010,6 +1010,7 @@ class AnalysisPipeline:
                             # End discovery phase
                             st.session_state['discovery_active'] = False
                             st.session_state['discovery_confirm_pending'] = False
+                            st.session_state['intent_mode'] = 'full_plan'
                         else:
                             # Treat message as adjustments: restart discovery with first question
                             st.warning("Ajustes recebidos. Vamos refinar a descoberta.")

@@ -183,7 +183,62 @@ class OrchestratorAgent(BaseAgent):
         # Validate with Pydantic and return as dict
         try:
             briefing = BriefingModel.model_validate(data)
-            return briefing.model_dump()
+            result = briefing.model_dump()
+            # Heuristic backfill for missing tool
+            try:
+                if (result.get('tool') is None or str(result.get('tool')).strip() == ''):
+                    intent = (result.get('main_intent') or '').lower()
+                    if intent in ['simple_analysis', 'statistical_analysis', 'visualization']:
+                        text = (result.get('user_query') or '')
+                        # Include deliverables text if available to help inference
+                        if isinstance(result.get('deliverables'), list):
+                            text += ' ' + ' '.join([str(d) for d in result['deliverables']])
+                        t = text.lower()
+                        # Keyword-to-tool mapping aligned with app.py simple_mappings
+                        keyword_map = [
+                            ('outlier', 'detect_outliers'),
+                            ('correla', 'correlation_matrix'),
+                            ('duplic', 'check_duplicates'),
+                            ('hist', 'plot_histogram'),
+                            ('box', 'plot_boxplot'),
+                            ('scatter', 'plot_scatter'),
+                            ('kmeans', 'run_kmeans_clustering'),
+                            ('tipo', 'get_data_types'),
+                            ('média', 'get_central_tendency'),
+                            ('media', 'get_central_tendency'),
+                            ('mediana', 'get_central_tendency'),
+                            ('variân', 'get_variability'),
+                            ('varian', 'get_variability'),
+                            ('desvio', 'get_variability'),
+                            ('intervalo', 'get_ranges'),
+                            ('percentil', 'get_ranges'),
+                            ('contagem', 'get_value_counts'),
+                            ('frequente', 'get_frequent_values'),
+                            ('temporal', 'get_temporal_patterns'),
+                            ('sazonal', 'get_temporal_patterns'),
+                            ('clusters', 'get_clusters_summary'),
+                            ('sentimento', 'sentiment_analysis'),
+                            ('wordcloud', 'generate_wordcloud'),
+                            ('mapa', 'plot_geospatial_map'),
+                            ('sobreviv', 'perform_survival_analysis'),
+                            ('tópico', 'topic_modeling'),
+                            ('topico', 'topic_modeling'),
+                            ('bayesian', 'perform_bayesian_inference'),
+                            # Model evaluation patterns
+                            ('precision', 'evaluate_model'),
+                            ('recall', 'evaluate_model'),
+                            ('matriz de confus', 'evaluate_model'),
+                        ]
+                        inferred = None
+                        for kw, tool in keyword_map:
+                            if kw in t:
+                                inferred = tool
+                                break
+                        result['tool'] = inferred or 'descriptive_stats'
+            except Exception:
+                # Never fail the flow on heuristic filling
+                pass
+            return result
         except ValidationError as ve:
             # Provide structured feedback upstream; keep same shape for downstream components.
             raise ValueError(f"Briefing validation error: {ve}")

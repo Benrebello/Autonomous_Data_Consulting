@@ -8,12 +8,16 @@ import os
 import glob
 from io import BytesIO
 import traceback
+import sys
+from pathlib import Path
 
 # Local imports
 from config import load_config, obtain_llm
 from agents import (OrchestratorAgent, TeamLeaderAgent, DataArchitectAgent, 
                     DataAnalystTechnicalAgent, DataAnalystBusinessAgent, DataScientistAgent)
 import tools
+# Ensure local module resolution for 'prompts.py' to avoid shadowing by similarly named external packages
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prompts import QA_REVIEW_PROMPT
 
 def stream_response_to_chat(stream) -> str:

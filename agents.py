@@ -3,8 +3,8 @@ import json
 import time
 from langchain.prompts import PromptTemplate
 from langchain.schema import BaseOutputParser
-from pydantic import BaseModel, Field
-from typing import Dict, Any
+from pydantic import BaseModel, Field, ValidationError
+from typing import Dict, Any, List, Optional, Literal
 
 from prompts import (ORCHESTRATOR_PROMPT, TEAM_LEADER_PROMPT, 
                      SYNTHESIS_PROMPT, FINAL_RESPONSE_PROMPT)
@@ -72,6 +72,91 @@ class BaseAgent:
         self.llm = llm
         self.rpm_limit = rpm_limit
 
+
+class BriefingModel(BaseModel):
+    """Structured representation of the Orchestrator's project briefing."""
+    user_query: str
+    main_goal: str
+    key_questions: List[str]
+    main_intent: str
+    deliverables: List[str]
+    tool: Optional[str] = None
+
+
+AgentName = Literal[
+    "DataArchitectAgent",
+    "DataAnalystTechnicalAgent",
+    "DataAnalystBusinessAgent",
+    "DataScientistAgent",
+]
+
+ToolName = Literal[
+    "clean_data",
+    "descriptive_stats",
+    "detect_outliers",
+    "correlation_matrix",
+    "get_exploratory_analysis",
+    "plot_histogram",
+    "plot_boxplot",
+    "plot_scatter",
+    "generate_chart",
+    "run_kmeans_clustering",
+    "get_data_types",
+    "get_central_tendency",
+    "get_variability",
+    "get_ranges",
+    "get_value_counts",
+    "get_frequent_values",
+    "get_temporal_patterns",
+    "get_clusters_summary",
+    "get_outliers_summary",
+    "get_variable_relations",
+    "get_influential_variables",
+    "perform_t_test",
+    "perform_chi_square",
+    "linear_regression",
+    "logistic_regression",
+    "random_forest_classifier",
+    "normalize_data",
+    "impute_missing",
+    "pca_dimensionality",
+    "decompose_time_series",
+    "compare_datasets",
+    "plot_heatmap",
+    "evaluate_model",
+    "forecast_arima",
+    "perform_anova",
+    "check_duplicates",
+    "select_features",
+    "generate_wordcloud",
+    "plot_line_chart",
+    "plot_violin_plot",
+    "perform_kruskal_wallis",
+    "svm_classifier",
+    "knn_classifier",
+    "sentiment_analysis",
+    "plot_geospatial_map",
+    "perform_survival_analysis",
+    "topic_modeling",
+    "perform_bayesian_inference",
+]
+
+
+class PlanTaskModel(BaseModel):
+    """Single execution task in the plan."""
+    task_id: int
+    description: str
+    agent_responsible: AgentName
+    tool_to_use: ToolName
+    dependencies: List[int] = Field(default_factory=list)
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+    output_variable: str
+
+
+class ExecutionPlanModel(BaseModel):
+    """Validated execution plan produced by TeamLeaderAgent."""
+    execution_plan: List[PlanTaskModel]
+
 class OrchestratorAgent(BaseAgent):
     def run(self, user_query: str) -> dict:
         global last_call_time
@@ -87,9 +172,16 @@ class OrchestratorAgent(BaseAgent):
             raise ValueError("Empty response from LLM. Check API key and connectivity.")
         response = clean_json_response(response)
         try:
-            return json.loads(response)
+            data = json.loads(response)
         except json.JSONDecodeError as e:
             raise ValueError(f"LLM response is not valid JSON: {response[:500]}") from e
+        # Validate with Pydantic and return as dict
+        try:
+            briefing = BriefingModel.model_validate(data)
+            return briefing.model_dump()
+        except ValidationError as ve:
+            # Provide structured feedback upstream; keep same shape for downstream components.
+            raise ValueError(f"Briefing validation error: {ve}")
 
 class TeamLeaderAgent(BaseAgent):
     def create_plan(self, briefing: dict) -> dict:
@@ -100,15 +192,32 @@ class TeamLeaderAgent(BaseAgent):
             time.sleep(interval - (current_time - last_call_time))
         last_call_time = time.time()
         
-        prompt = TEAM_LEADER_PROMPT.format(briefing=json.dumps(briefing, indent=2))
-        response = self.llm.invoke(prompt).content
-        if not response.strip():
-            raise ValueError("Empty response from LLM. Check API key and connectivity.")
-        response = clean_json_response(response)
-        try:
-            return json.loads(response)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"LLM response is not valid JSON: {response[:500]}") from e
+        # Try up to 2 correction rounds when validation fails
+        error_note = None
+        for attempt in range(3):
+            prompt = TEAM_LEADER_PROMPT.format(briefing=json.dumps(briefing, indent=2))
+            if error_note:
+                prompt += f"\n\nATENÇÃO: O plano anterior era inválido pelos seguintes motivos de validação. Corrija e retorne APENAS JSON válido no schema exigido.\nErros: {error_note}\n"
+            response = self.llm.invoke(prompt).content
+            if not response.strip():
+                raise ValueError("Empty response from LLM. Check API key and connectivity.")
+            response = clean_json_response(response)
+            try:
+                data = json.loads(response)
+            except json.JSONDecodeError as e:
+                error_note = f"JSON inválido: {str(e)} | Trecho: {response[:400]}"
+                continue
+            # Validate with Pydantic
+            try:
+                plan = ExecutionPlanModel.model_validate(data)
+                return plan.model_dump()
+            except ValidationError as ve:
+                error_note = str(ve)
+                continue
+        # If we reach here, return last parsed data if any, otherwise raise
+        if error_note:
+            raise ValueError(f"Plano inválido após tentativas de correção: {error_note}")
+        raise ValueError("Falha ao obter plano válido do LLM.")
         
     def synthesize_results(self, execution_results: dict) -> str:
         global last_call_time

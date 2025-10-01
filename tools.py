@@ -16,7 +16,6 @@ from sklearn.decomposition import PCA
 from scipy import stats
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
-from textblob import TextBlob
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
 from wordcloud import WordCloud
@@ -624,7 +623,15 @@ def knn_classifier(df, x_columns, y_column, n_neighbors=5):
     return {"score": score}
 
 def sentiment_analysis(df, text_column):
-    """Perform sentiment analysis on text column."""
+    """Perform sentiment analysis on text column.
+
+    Lazy-import TextBlob to avoid module import error during test collection
+    when sentiment analysis is not used.
+    """
+    try:
+        from textblob import TextBlob
+    except Exception:
+        return {"error": "textblob is not installed"}
     sentiments = []
     for text in df[text_column].dropna().astype(str):
         blob = TextBlob(text)

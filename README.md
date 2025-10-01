@@ -29,7 +29,7 @@ Uma aplicação web baseada em agentes de IA autônomos para análise explorató
 ## Funcionalidades
 
 - **Análise Exploratória de Dados (EDA)**: Responde perguntas sobre tipos de dados, distribuições, intervalos, tendências centrais, variabilidade, padrões, valores frequentes, clusters, outliers e correlações.
-- **Representações Gráficas**: Geração automática de histogramas, boxplots, gráficos de dispersão e outras visualizações.
+- **Representações Gráficas + Seleção de Colunas**: Geração automática de histogramas, boxplots, gráficos de dispersão e outras visualizações, com expander para selecionar/confirmar colunas (X/Y) antes da execução.
 - **Detecção de Anomalias**: Identificação de outliers usando métodos como IQR e Z-score.
 - **Memória de Análises**: Armazena conclusões de análises anteriores para contextualizar respostas futuras.
 - **Orquestração Multi-Agente**: Equipe de agentes especializados (Orchestrator, Team Leader, Data Architect, Data Analyst Técnico, Data Analyst de Negócios, Data Scientist) trabalhando em conjunto.
@@ -44,7 +44,12 @@ Uma aplicação web baseada em agentes de IA autônomos para análise explorató
 - **Relatório em PDF (ABNT + Pirâmide de Minto)**: Geração e download de relatório com capa, resumo executivo, desenvolvimento, resultados (figuras) e conclusões.
 - **Gráficos em Memória + Download**: Renderização de gráficos via bytes (sem depender de arquivos no disco) e botão de download por gráfico.
 - **Manutenção**: Botão na sidebar para limpar arquivos antigos `plot_*.png` do diretório.
-- **Resiliência de Plano e JSON**: Prompts ajustados para forçar saída estrita em JSON e normalização robusta de planos fora do schema.
+- **Validação e Auto-correção**: Validação Pydantic do Briefing e do Plano; em caso de erro de schema/JSON, ativa ciclo de auto-correção com feedback ao LLM.
+- **Retry Seletivo + Cascata**: Tarefas que falham são replanejadas e reexecutadas uma vez; dependentes já concluídas são invalidadas e reprocessadas quando necessário.
+- **Revisão Crítica (QA)**: Após a síntese, um agente revisor (QA) aponta melhorias e limitações; a revisão é usada como contexto na resposta final.
+- **Cache de Planos de Sucesso**: Planos sem erros são salvos em cache (por intenção/colunas) e podem ser reutilizados para acelerar execuções futuras.
+- **Analytics da Execução**: Expander com métricas por ferramenta (taxa de erro/sucesso, tempo médio) e inputs mais frequentes em erros.
+- **Log JSON Opcional**: Toggle para salvar o `execution_log` em `logs/execution_log_<timestamp>.json`.
 
 ## Arquitetura
 
@@ -68,14 +73,27 @@ O sistema é baseado em uma arquitetura modular com os seguintes componentes:
 ## Documentação
 
 - Guia de arquitetura e decisões de projeto: [ARCHITECTURE.md](./ARCHITECTURE.md)
+- Diagrama de Estrutura (EN): [docs/structure.md](./docs/structure.md)
+- Diagrama de Processamento (EN): [docs/data_processing.md](./docs/data_processing.md)
+- Diagrama de Relacionamentos (EN): [docs/relationships.md](./docs/relationships.md)
+- Guia de Operações/Implantação: [docs/OPERATIONS.md](./docs/OPERATIONS.md)
+- Guia de Analytics e Logs: [docs/ANALYTICS.md](./docs/ANALYTICS.md)
+- Guia do Cache de Planos: [docs/CACHE.md](./docs/CACHE.md)
+- Estratégia de Testes: [docs/TESTING.md](./docs/TESTING.md)
+- Troubleshooting: [docs/TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md)
+- Como contribuir: [CONTRIBUTING.md](./CONTRIBUTING.md)
+- Código de Conduta: [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
+- Changelog: [CHANGELOG.md](./CHANGELOG.md)
+- Segurança: [docs/SECURITY.md](./docs/SECURITY.md)
 
 ### Pipeline de Execução
-1. **Briefing**: Orquestrator analisa a pergunta.
-2. **Plano**: Team Leader cria um plano com tarefas dependentes.
-3. **Execução**: Agentes executam tarefas em ordem, resolvendo dependências.
-4. **Síntese**: Team Leader sintetiza resultados.
-5. **Resposta Final**: Data Analyst de Negócios gera resposta com conclusões e memória.
-6. **Exportação**: Geração do relatório em PDF para download.
+1. **Briefing**: Orchestrator analisa a pergunta e retorna JSON validado (Pydantic) ou aciona auto-correção.
+2. **Plano**: Team Leader cria um plano (validado via Pydantic); em falhas, um ciclo de correção é aplicado.
+3. **Execução**: Agentes executam tarefas em ordem/respeito a dependências; em erro, retry seletivo com plano corrigido e reexecução em cascata dos dependentes.
+4. **Síntese**: Team Leader sintetiza resultados a partir de um contexto compacto.
+5. **Revisão (QA)**: Revisor crítico gera sugestões; revisão é incorporada ao contexto.
+6. **Resposta Final**: Data Analyst de Negócios gera resposta final incorporando QA.
+7. **Exportação**: Geração do relatório em PDF para download.
 
 ### Diagramas
 
@@ -100,11 +118,12 @@ graph TD
     C --> O[Ferramentas de ML: run_kmeans_clustering]
     C --> P[Utilitários: read_odt_tables, normalize_dataframe_columns]
 
-    D --> Q[Templates para briefing, plano, síntese]
+    D --> Q[Templates para briefing, plano, síntese e QA]
 
     E --> R[Integração com LLMs: Groq, OpenAI, Gemini]
 
     S[config.json - Arquivo de configuração] --> E
+    V[plan_cache (session)] --> A
     T[requirements.txt - Dependências] --> U[streamlit, pandas, langchain, etc.]
 ```
 
@@ -114,17 +133,21 @@ flowchart TD
     A[Usuário faz upload de datasets] --> B[Pré-processamento: Normalização de colunas, Seleção de DataFrame padrão]
     B --> C[Configuração de relacionamentos e junções: Chaves, tipo de junção, teste de junção]
     C --> D[Usuário pergunta no chat]
-    D --> E[OrchestratorAgent: Converte pergunta em briefing estruturado JSON]
-    E --> F[TeamLeaderAgent: Cria plano de execução passo a passo JSON]
-    F --> G[Normalização do plano em app.py: Trata variações no JSON]
-    G --> H[Execução das tarefas: Agentes chamam ferramentas em tools.py]
-    H --> I[Armazenamento de resultados no shared_context]
-    I --> J[TeamLeader sintetiza resultados]
-    J --> K[DataAnalystBusinessAgent gera resposta final com conclusões]
-    K --> L[Resposta armazenada na memória da sessão]
-    L --> M[Geração de gráficos: Renderização em memória, botões de download]
-    M --> N[Geração de relatório PDF: ABNT + Pirâmide de Minto, download]
-    N --> O[Fim do processamento]
+    D --> E[OrchestratorAgent: Briefing estrito em JSON + Validação Pydantic e auto-correção]
+    E --> F[TeamLeaderAgent: Plano de execução (JSON) + Validação Pydantic e auto-correção]
+    F --> G[Normalização do plano em app.py (variações como tarefas/plano_de_execução/projeto)]
+    G --> H[Expander: Seleção/Confirmação de colunas para tarefas de gráficos]
+    H --> I[Execução: Agentes chamam ferramentas; retry seletivo e reexecução em cascata se outputs mudarem]
+    I --> J[Resultados no shared_context]
+    J --> K[TeamLeader sintetiza resultados (contexto compacto)]
+    K --> L[Revisão Crítica (QA): sugestões são incorporadas ao contexto]
+    L --> M[DataAnalystBusinessAgent: Resposta final com conclusões]
+    M --> N[Resposta armazenada na memória da sessão]
+    N --> O[Gráficos em memória + download]
+    O --> P[PDF: ABNT + Pirâmide de Minto (lazy reportlab)]
+    P --> Q[Analytics: taxa por ferramenta, tempo médio, inputs de erro]
+    Q --> R[Logs: opcional salvar JSON em logs/]
+    R --> S[Fim do processamento]
 ```
 
 #### Diagrama de Relacionamentos entre Agentes e Ferramentas
@@ -218,7 +241,6 @@ flowchart TD
     U --> R
     U --> S
 ```
-
 
 ### Pré-requisitos
 - Python 3.8+
@@ -490,11 +512,12 @@ graph TD
     C --> O[ML Tools: run_kmeans_clustering]
     C --> P[Utilities: read_odt_tables, normalize_dataframe_columns]
 
-    D --> Q[Templates for briefing, plan, synthesis]
+    D --> Q[Templates for briefing, plan, synthesis and QA]
 
     E --> R[LLM Integration: Groq, OpenAI, Gemini]
 
     S[config.json - Configuration file] --> E
+    V[plan_cache (session)] --> A
     T[requirements.txt - Dependencies] --> U[streamlit, pandas, langchain, etc.]
 ```
 
@@ -504,17 +527,21 @@ flowchart TD
     A[User uploads datasets] --> B[Preprocessing: Column normalization, Default DataFrame selection]
     B --> C[Relationship and join configuration: Keys, join type, join test]
     C --> D[User asks question in chat]
-    D --> E[OrchestratorAgent: Converts question into structured JSON briefing]
-    E --> F[TeamLeaderAgent: Creates step-by-step JSON execution plan]
-    F --> G[Plan normalization in app.py: Handles JSON variations]
-    G --> H[Task execution: Agents call tools in tools.py]
-    H --> I[Result storage in shared_context]
-    I --> J[Team Leader synthesizes results]
-    J --> K[DataAnalystBusinessAgent generates final response with conclusions]
-    K --> L[Response stored in session memory]
-    L --> M[Chart generation: In-memory rendering, download buttons]
-    M --> N[PDF report generation: ABNT + Minto Pyramid, download]
-    N --> O[End of processing]
+    D --> E[OrchestratorAgent: Strict JSON briefing + Pydantic validation and auto-correction]
+    E --> F[TeamLeaderAgent: Execution plan (JSON) + Pydantic validation and auto-correction]
+    F --> G[Plan normalization in app.py (variations like tasks/execution_plan/project)]
+    G --> H[Expander: Column selection/confirmation for chart tasks]
+    H --> I[Execution: Agents call tools; selective retry and cascading re-execution if outputs change]
+    I --> J[Results stored in shared_context]
+    J --> K[Team Leader synthesizes results (compact context)]
+    K --> L[QA Review: suggestions incorporated into context]
+    L --> M[DataAnalystBusinessAgent: Final response with conclusions]
+    M --> N[Full response stored in session memory]
+    N --> O[In-memory charts + download]
+    O --> P[PDF: ABNT-like + Minto Pyramid (lazy reportlab)]
+    P --> Q[Analytics: success/error by tool, mean duration, frequent error inputs]
+    Q --> R[Logs: optional JSON save to logs/]
+    R --> S[End of processing]
 ```
 
 #### Relationships Diagram between Agents and Tools

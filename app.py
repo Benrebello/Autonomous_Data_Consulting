@@ -19,145 +19,39 @@ import tools
 # Ensure local module resolution for 'prompts.py' to avoid shadowing by similarly named external packages
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prompts import QA_REVIEW_PROMPT
-
-def stream_response_to_chat(stream) -> str:
-    """Stream chunks to a single chat message, keeping text on screen.
-
-    Aggregates chunk content and updates one placeholder to avoid
-    per-chunk newlines and flicker. Returns the full concatenated text.
-    """
-    placeholder = st.empty()
-    full_text = ""
-    for chunk in stream:
-        chunk_text = chunk.content if hasattr(chunk, 'content') else str(chunk)
-        full_text += chunk_text
-        # Render progressively in markdown to preserve formatting
-        placeholder.markdown(full_text)
-    return full_text
-
-def cleanup_old_plot_files(pattern: str = "plot_*.png") -> int:
-    """Remove legacy plot files matching the given pattern in the CWD.
-
-    Returns the number of files removed.
-    """
-    removed = 0
-    for path in glob.glob(pattern):
-        try:
-            os.remove(path)
-            removed += 1
-        except Exception:
-            pass
-    return removed
-
-def generate_pdf_report(title: str, user_query: str, synthesis: str, full_response: str, plan: dict, charts: list[bytes]) -> bytes:
-    """Generate a PDF report following ABNT-like formatting and Minto Pyramid structure.
-
-    - Title page
-    - Executive Summary (Minto: Situation, Complication, Question, Answer)
-    - Development (Methods, Results with figures)
-    - Conclusion and Recommendations
-    - References (placeholder)
-    """
-    # Lazy import reportlab to avoid hard dependency during module import (useful for tests without reportlab)
-    try:
-        from reportlab.lib.pagesizes import A4
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.units import cm
-        from reportlab.lib import enums
-    except Exception as e:
-        # If reportlab is missing, return a minimal PDF-like bytes as fallback
-        # so the app does not crash; users can still run without PDF feature.
-        return BytesIO(b"ReportLab not available. Install reportlab to generate PDFs.").getvalue()
-
-    buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4,
-                            leftMargin=3*cm, rightMargin=2*cm,
-                            topMargin=3*cm, bottomMargin=2*cm)
-    styles = getSampleStyleSheet()
-    # ABNT-like: Times 12, 1.5 spacing (approx using spaceBefore/After)
-    normal = ParagraphStyle('ABNT_Normal', parent=styles['Normal'], fontName='Times-Roman', fontSize=12, leading=18)
-    h1 = ParagraphStyle('ABNT_H1', parent=styles['Heading1'], fontName='Times-Bold', fontSize=14, spaceAfter=12, alignment=enums.TA_CENTER)
-    h2 = ParagraphStyle('ABNT_H2', parent=styles['Heading2'], fontName='Times-Bold', fontSize=12, spaceAfter=8)
-
-    elements = []
-    # Title page
-    elements.append(Paragraph(title or 'Relatório de Análise de Dados', h1))
-    elements.append(Spacer(1, 18))
-    elements.append(Paragraph(f"Pergunta do usuário: {user_query}", normal))
-    elements.append(Spacer(1, 18))
-    elements.append(Paragraph("Autores: Equipe Multiagente (Orchestrator, Team Leader, Data Architect, Data Analyst, Data Scientist)", normal))
-    elements.append(PageBreak())
-
-    # Executive Summary - Minto Pyramid
-    elements.append(Paragraph("Resumo Executivo (Pirâmide de Minto)", h2))
-    elements.append(Paragraph("Situação: Contexto do conjunto de dados e objetivo declarado pelo usuário.", normal))
-    elements.append(Paragraph("Complicação: Limitações, qualidade dos dados, volume e restrições levantadas.", normal))
-    elements.append(Paragraph("Questão-chave: Qual insight ou decisão a análise precisa apoiar?", normal))
-    elements.append(Paragraph("Resposta: Síntese de alto nível dos resultados e implicações.", normal))
-    if synthesis:
-        elements.append(Spacer(1, 12))
-        elements.append(Paragraph("Síntese do Time Leader:", h2))
-        elements.append(Paragraph(full_response[:4000].replace('\n', '<br/>'), normal))
-
-    # Development
-    elements.append(PageBreak())
-    elements.append(Paragraph("Desenvolvimento", h2))
-    elements.append(Paragraph("Método: Plano de execução gerado e ferramentas utilizadas.", normal))
-    if plan:
-        try:
-            plan_brief = str({k: plan[k] for k in plan.keys() if k != 'execution_plan'})
-        except Exception:
-            plan_brief = 'Plano não disponível.'
-        elements.append(Paragraph(f"Plano: {plan_brief}", normal))
-        if 'execution_plan' in plan:
-            for t in plan['execution_plan'][:10]:
-                desc = t.get('description', '')
-                tool = t.get('tool_to_use', '')
-                elements.append(Paragraph(f"Tarefa {t.get('task_id')}: {desc} (ferramenta: {tool})", normal))
-
-    # Results with charts
-    if charts:
-        elements.append(Spacer(1, 12))
-        elements.append(Paragraph("Resultados (Figuras)", h2))
-        for ch in charts[:6]:  # limit pages
-            try:
-                img = Image(BytesIO(ch))
-                img._restrictSize(15*cm, 12*cm)
-                elements.append(img)
-                elements.append(Spacer(1, 12))
-            except Exception:
-                continue
-
-    # Conclusion
-    elements.append(PageBreak())
-    elements.append(Paragraph("Conclusões e Recomendações", h2))
-    elements.append(Paragraph(full_response.replace('\n', '<br/>')[:8000], normal))
-
-    # References
-    elements.append(Spacer(1, 12))
-    elements.append(Paragraph("Referências (quando aplicável)", h2))
-    elements.append(Paragraph("Este relatório segue formatação semelhante às normas ABNT (margens e tipografia) e estrutura de comunicação da Pirâmide de Minto.", normal))
-
-    doc.build(elements)
-    pdf_bytes = buf.getvalue()
-    buf.close()
-    return pdf_bytes
+from rate_limiter import RateLimiter, get_rate_limiter
+from ui_components import (RateLimitHandler, display_rate_limit_info, display_token_estimate,
+                           stream_response_to_chat, cleanup_old_plot_files, generate_pdf_report)
+from optimizations import (ParallelExecutor, compress_execution_context, get_metrics_collector,
+                           validate_query_feasibility, suggest_analyses, display_recommendations,
+                           display_execution_explanations)
 
 class AnalysisPipeline:
     def __init__(self, llm, dataframes: Dict[str, pd.DataFrame], rpm_limit=10):
         self.dataframes = dataframes
         self.shared_context = {"dataframes": self.dataframes}
         
-        # Instancia todos os agentes
-        self.orchestrator = OrchestratorAgent(llm, rpm_limit)
-        self.team_leader = TeamLeaderAgent(llm, rpm_limit)
+        # Initialize rate limiter and UI handler
+        self.rate_limiter = get_rate_limiter(rpm_limit=rpm_limit)
+        self.rate_limit_handler = RateLimitHandler()
+        
+        # Initialize optimizations
+        self.parallel_executor = ParallelExecutor(max_workers=3)
+        self.metrics = get_metrics_collector()
+        
+        # Instancia todos os agentes com rate limiter compartilhado
+        self.orchestrator = OrchestratorAgent(llm, rpm_limit, rate_limiter=self.rate_limiter)
+        self.team_leader = TeamLeaderAgent(llm, rpm_limit, rate_limiter=self.rate_limiter)
         self.agents = {
-            "DataArchitectAgent": DataArchitectAgent(llm, rpm_limit),
-            "DataAnalystTechnicalAgent": DataAnalystTechnicalAgent(llm, rpm_limit),
-            "DataAnalystBusinessAgent": DataAnalystBusinessAgent(llm, rpm_limit),
-            "DataScientistAgent": DataScientistAgent(llm, rpm_limit),
+            "DataArchitectAgent": DataArchitectAgent(llm, rpm_limit, rate_limiter=self.rate_limiter),
+            "DataAnalystTechnicalAgent": DataAnalystTechnicalAgent(llm, rpm_limit, rate_limiter=self.rate_limiter),
+            "DataAnalystBusinessAgent": DataAnalystBusinessAgent(llm, rpm_limit, rate_limiter=self.rate_limiter),
+            "DataScientistAgent": DataScientistAgent(llm, rpm_limit, rate_limiter=self.rate_limiter),
         }
+        
+        # Set wait callback for all agents
+        for agent in [self.orchestrator, self.team_leader] + list(self.agents.values()):
+            agent.set_wait_callback(self.rate_limit_handler.on_wait)
         
         # Mapeia nomes de ferramentas para funções
         self.tool_mapping = {
@@ -232,6 +126,30 @@ class AnalysisPipeline:
             "perform_named_entity_recognition": tools.perform_named_entity_recognition,
             "text_summarization": tools.text_summarization,
             "add_time_features_from_seconds": tools.add_time_features_from_seconds,
+            # Extended tools - Advanced Analysis
+            "data_profiling": tools.data_profiling,
+            "missing_data_analysis": tools.missing_data_analysis,
+            "cardinality_analysis": tools.cardinality_analysis,
+            "distribution_tests": tools.distribution_tests,
+            "create_polynomial_features": tools.create_polynomial_features,
+            "create_interaction_features": tools.create_interaction_features,
+            "create_binning": tools.create_binning,
+            "create_rolling_features": tools.create_rolling_features,
+            "create_lag_features": tools.create_lag_features,
+            "correlation_tests": tools.correlation_tests,
+            "multicollinearity_detection": tools.multicollinearity_detection,
+            "gradient_boosting_classifier": tools.gradient_boosting_classifier,
+            "hyperparameter_tuning": tools.hyperparameter_tuning,
+            "feature_importance_analysis": tools.feature_importance_analysis,
+            "model_evaluation_detailed": tools.model_evaluation_detailed,
+            "rfm_analysis": tools.rfm_analysis,
+            "ab_test_analysis": tools.ab_test_analysis,
+            "export_to_excel": tools.export_to_excel,
+            "export_analysis_results": tools.export_analysis_results,
+            # Data validation and auto-correction
+            "validate_and_clean_dataframe": tools.validate_and_clean_dataframe,
+            "smart_type_inference": tools.smart_type_inference,
+            "detect_data_quality_issues": tools.detect_data_quality_issues,
         }
 
         # Memória para armazenar conclusões anteriores
@@ -387,13 +305,39 @@ class AnalysisPipeline:
         bullets: list[str] = []
         recs: list[str] = []
 
-        # Heurísticas simples para extrair pontos do resultado
+        # Construir bullets - versão otimizada para resultados grandes
+        bullets = []
         if isinstance(result, dict):
-            for k, v in list(result.items())[:6]:
-                bullets.append(f"{k}: {v}")
-        elif isinstance(result, pd.DataFrame):
-            bullets.append(f"Rows x Cols: {result.shape}")
-            bullets.append(f"Columns: {', '.join(list(result.columns[:6]))}{'...' if result.shape[1] > 6 else ''}")
+            # Para correlation_matrix, mostrar apenas summary
+            if 'significant_correlations' in result:
+                bullets.append(f"Tamanho da amostra: {result.get('sample_size', 'N/A')}")
+                sig_corrs = result.get('significant_correlations', [])
+                if sig_corrs:
+                    bullets.append(f"Correlações significativas encontradas: {len(sig_corrs)}")
+                    # Mostrar apenas top 3
+                    for corr in sig_corrs[:3]:
+                        bullets.append(
+                            f"  • {corr['variable1']} vs {corr['variable2']}: "
+                            f"{corr['interpretation']}"
+                        )
+                    if len(sig_corrs) > 3:
+                        bullets.append(f"  ... e mais {len(sig_corrs)-3} correlações")
+                else:
+                    bullets.append("Nenhuma correlação significativa encontrada")
+            else:
+                # Outros dicts: comportamento normal mas com limite
+                for k, v in list(result.items())[:10]:  # Máximo 10 keys
+                    if isinstance(v, (list, dict)) and len(str(v)) > 200:
+                        bullets.append(f"{k}: [dados extensos]")
+                    else:
+                        v_str = str(v)
+                        bullets.append(f"{k}: {v_str[:150]}")
+                if len(result) > 10:
+                    bullets.append(f"... e mais {len(result)-10} campos")
+        elif isinstance(result, (list, tuple)):
+            bullets.extend([str(item)[:100] for item in result[:5]])
+            if len(result) > 5:
+                bullets.append(f"... e mais {len(result)-5} itens")
         else:
             bullets.append(str(result)[:300])
 
@@ -412,11 +356,20 @@ class AnalysisPipeline:
 
         # Anti-repetição: compare assinatura
         sig = self._make_summary_signature(topic or '', st.session_state.get('last_tool') or '', result)
+        
+        # Não mostrar intro para queries muito simples (apenas shape/columns)
+        is_simple_query = (
+            isinstance(result, dict) and 
+            len(result) <= 3 and 
+            all(k in ['shape', 'types', 'columns', 'Rows x Cols', 'Columns'] for k in result.keys())
+        )
+        
         if st.session_state.get('last_summary_signature') == sig:
             # Mesma assinatura -> retorne apenas bullets atualizados
             intro = "Resumo incremental:" if style != 'Concisa' else None
         else:
-            intro = None if style == 'Concisa' else f"Resumo sobre {topic or 'o resultado'}:"
+            # Só mostrar intro se não for query simples e não for estilo conciso
+            intro = None if (style == 'Concisa' or is_simple_query) else f"Resumo sobre {topic or 'o resultado'}:"
             st.session_state['last_summary_signature'] = sig
 
         # Render por estilo
@@ -790,6 +743,22 @@ class AnalysisPipeline:
             cols = 'class' if 'class' in df_default.columns else (cat_cols[1] if len(cat_cols) > 1 else idx)
             vals = numeric_cols[0] if numeric_cols else df_default.columns[-1]
             inputs = {'df': df_default, 'index': idx, 'columns': cols, 'values': vals, 'aggfunc': 'mean'}
+        elif tool == 'plot_histogram':
+            # Choose a numeric column or fallback to first column
+            col = numeric_cols[0] if numeric_cols else df_default.columns[0]
+            inputs = {'df': df_default, 'column': col}
+        elif tool == 'plot_boxplot':
+            # Choose a numeric column or fallback to first column
+            col = numeric_cols[0] if numeric_cols else df_default.columns[0]
+            inputs = {'df': df_default, 'column': col}
+        elif tool == 'plot_scatter':
+            # Choose two numeric columns; fallback to first two columns available
+            if len(numeric_cols) >= 2:
+                x_col, y_col = numeric_cols[0], numeric_cols[1]
+            else:
+                x_col = df_default.columns[0]
+                y_col = df_default.columns[1] if len(df_default.columns) > 1 else df_default.columns[0]
+            inputs = {'df': df_default, 'x_column': x_col, 'y_column': y_col}
         elif tool == 'fill_missing_with_median':
             cols = numeric_cols if numeric_cols else []
             inputs = {'df': df_default, 'columns': cols}
@@ -972,6 +941,18 @@ class AnalysisPipeline:
             "tópico": "topic_modeling",
             "bayesian": "perform_bayesian_inference",
             "perfil": "descriptive_stats",
+            # Plot intents
+            "gráfico": "plot_histogram",
+            "grafico": "plot_histogram",
+            "gráficos": "plot_histogram",
+            "graficos": "plot_histogram",
+            "histograma": "plot_histogram",
+            "boxplot": "plot_boxplot",
+            "dispersão": "plot_scatter",
+            "dispersao": "plot_scatter",
+            "scatter": "plot_scatter",
+            "plot": "plot_histogram",
+            "visualiza": "plot_histogram",
         }
         # Fast path: generic queries asking for possible analyses -> suggestions only
         generic_patterns = [
@@ -1168,20 +1149,26 @@ class AnalysisPipeline:
                 }
                 st.session_state['intent_mode'] = 'simple_analysis'
                 st.session_state['last_tool'] = tool_name
-                # Compose and show assistant response
+                
+                # Para análises simples, mostrar apenas resultado formatado (sem LLM)
                 composed = self._compose_response(topic=user_query, result=result, style=st.session_state.get('response_style', 'Padrão'))
                 with st.chat_message("assistant"):
                     st.markdown(composed)
-                    # Build business narrative and full response
-                    if isinstance(result, dict):
-                        synthesis = f"Resultado da ferramenta {tool_name}: " + ", ".join([f"{k}: {v}" for k, v in result.items()])
-                    else:
-                        synthesis = f"Resultado da ferramenta {tool_name}: {str(result)}"
-                    memory_context = "\n".join(self.memory[-5:])
-                    final_response_stream = self.agents["DataAnalystBusinessAgent"].generate_final_response(synthesis, memory_context)
-                    full_response = stream_response_to_chat(final_response_stream)
+                    full_response = composed  # Usar apenas o composed, sem gerar resposta do LLM
                     if isinstance(result, bytes):
                         st.image(result)
+                    # If tool stored chart bytes in session, render the latest chart inline
+                    if 'charts' in st.session_state and st.session_state.charts:
+                        last_chart = st.session_state.charts[-1]
+                        if isinstance(last_chart, dict) and 'bytes' in last_chart:
+                            st.image(last_chart['bytes'], caption=last_chart.get('caption'))
+                            st.download_button(
+                                label="Baixar gráfico",
+                                data=last_chart['bytes'],
+                                file_name="chart_last.png",
+                                mime="image/png",
+                                key=f"dl_last_chart_{len(st.session_state.charts)}"
+                            )
 
                 # Persist in memory and unified chat history
                 display_question = st.session_state.get('first_user_query') or user_query
@@ -1558,7 +1545,7 @@ class AnalysisPipeline:
 
             # Badge de alta demanda
             if auto_split and len(ready_tasks) > rpm_cfg:
-                st.sidebar.info(f"⚠️ Alta demanda: {len(ready_tasks)} tarefas prontas > RPM {rpm_cfg}. Dividindo em lotes.")
+                st.sidebar.info(f"Alta demanda: {len(ready_tasks)} tarefas prontas > RPM {rpm_cfg}. Dividindo em lotes.")
 
             # Número de tarefas a processar neste lote
             if auto_split:
@@ -1693,7 +1680,15 @@ class AnalysisPipeline:
         # Etapa 4: Síntese, Revisão Crítica (QA) e Resposta Final
         st.write("4. **Líder de Equipe:** Sintetizando resultados...")
         compact_context = self._compact_shared_context()
-        synthesis_report = self.team_leader.synthesize_results(compact_context)
+        
+        # Extract tools used from execution results
+        tools_used = []
+        for task_result in compact_context.get('tasks', []):
+            tool = task_result.get('tool_used')
+            if tool and tool not in tools_used:
+                tools_used.append(tool)
+        
+        synthesis_report = self.team_leader.synthesize_results(compact_context, tools_used=tools_used)
 
         # Passo QA: revisão crítica do rascunho técnico
         try:
@@ -1711,7 +1706,11 @@ class AnalysisPipeline:
         memory_context = "\n".join(memory_context_items)
 
         st.write("5. **Analista de Negócios:** Gerando insights e resposta final...")
-        final_response_stream = self.agents["DataAnalystBusinessAgent"].generate_final_response(synthesis_report, memory_context)
+        final_response_stream = self.agents["DataAnalystBusinessAgent"].generate_final_response(
+            synthesis_report, 
+            memory_context, 
+            tools_used=tools_used
+        )
         full_response = stream_response_to_chat(final_response_stream)
 
         # Armazenar resposta completa na memória (sem truncar) preferindo a pergunta original
@@ -1749,7 +1748,7 @@ class AnalysisPipeline:
                 path = os.path.join('logs', f"execution_log_{ts}.json")
                 with open(path, 'w', encoding='utf-8') as f:
                     json.dump(st.session_state.get('execution_log', []), f, ensure_ascii=False, indent=2, default=str)
-                st.sidebar.success(f"Execution log salvo em {path}")
+                st.sidebar.success(f"Log de execução salvo em {path}")
             except Exception as e:
                 st.sidebar.error(f"Falha ao salvar log: {e}")
 
@@ -1759,7 +1758,7 @@ class AnalysisPipeline:
             if not had_errors and cache_key is not None:
                 plan_cache[cache_key] = plan
                 st.session_state['plan_cache'] = plan_cache
-                st.sidebar.success("Plano salvo no cache de sucesso para reutilização futura.")
+                st.sidebar.success("Plano salvo no cache para reutilização futura.")
         except Exception:
             pass
 
@@ -1793,7 +1792,7 @@ class AnalysisPipeline:
 # --- Interface Streamlit ---
 def main():
     st.set_page_config(page_title="Autonomous Data Consulting", layout="wide")
-    st.title("🤖 Autonomous Data Consulting")
+    st.title("Autonomous Data Consulting")
 
     with st.sidebar:
         st.header("LLM Settings")
@@ -1821,6 +1820,9 @@ def main():
         st.info(f"RPM Limit set to: {rpm_limit}")
         # persist rpm in session for executor awareness
         st.session_state['rpm_limit'] = rpm_limit
+        
+        # Display rate limit information
+        display_rate_limit_info(rpm_limit=rpm_limit, max_tokens=8000)
 
         # API status indicator
         if not api_key.strip():
@@ -1895,6 +1897,9 @@ def main():
     if uploaded_files:
         dataframes = {}
         normalize_cols = st.sidebar.checkbox("Normalize column names (snake_case)", value=True)
+        auto_validate = st.sidebar.checkbox("Auto-validate and clean data", value=True, 
+                                           help="Automatically detect and fix common data issues like '97 min' -> 97.0")
+        
         for file in uploaded_files:
             fname = file.name.lower()
             if fname.endswith('.csv'):
@@ -1903,6 +1908,23 @@ def main():
                     df = tools.normalize_dataframe_columns(df)
                 corrected_df, report = tools.validate_and_correct_data_types(df)
                 df = corrected_df
+                
+                # Apply auto-validation if enabled
+                if auto_validate:
+                    validation_result = tools.validate_and_clean_dataframe(df)
+                    df = validation_result['dataframe']
+                    val_report = validation_result['report']
+                    
+                    if val_report['corrections_applied']:
+                        with st.expander(f"Validação automática: {file.name}"):
+                            st.success(f"✓ {len(val_report['corrections_applied'])} correções aplicadas")
+                            for correction in val_report['corrections_applied']:
+                                st.text(f"  • {correction}")
+                            if val_report['warnings']:
+                                st.warning("Avisos:")
+                                for warning in val_report['warnings']:
+                                    st.text(f"  • {warning}")
+                
                 corrections = {k: v for k, v in report.items() if 'Converted' in v}
                 if corrections:
                     st.info(f"Correções de tipos de dados para {file.name}: {corrections}")
@@ -1913,6 +1935,23 @@ def main():
                     df = tools.normalize_dataframe_columns(df)
                 corrected_df, report = tools.validate_and_correct_data_types(df)
                 df = corrected_df
+                
+                # Apply auto-validation if enabled
+                if auto_validate:
+                    validation_result = tools.validate_and_clean_dataframe(df)
+                    df = validation_result['dataframe']
+                    val_report = validation_result['report']
+                    
+                    if val_report['corrections_applied']:
+                        with st.expander(f"Validação automática: {file.name}"):
+                            st.success(f"✓ {len(val_report['corrections_applied'])} correções aplicadas")
+                            for correction in val_report['corrections_applied']:
+                                st.text(f"  • {correction}")
+                            if val_report['warnings']:
+                                st.warning("Avisos:")
+                                for warning in val_report['warnings']:
+                                    st.text(f"  • {warning}")
+                
                 corrections = {k: v for k, v in report.items() if 'Converted' in v}
                 if corrections:
                     st.info(f"Correções de tipos de dados para {file.name}: {corrections}")
@@ -2057,86 +2096,102 @@ def main():
 
     # Conversational Chat UI
     ## st.subheader("Chat")
+    # Chat interface - Gemini/GPT style
     if st.session_state.get('api_status', {}).get('ok') and 'dataframes' in st.session_state and st.session_state.dataframes:
-        user_prompt = None
-        if hasattr(st, 'chat_input'):
-            user_prompt = st.chat_input("Faça sua pergunta sobre os dados...")
-        else:
-            # Fallback for older Streamlit versions
-            tmp = st.text_area("Sua pergunta", key="text_prompt", height=80)
-            if st.button("Enviar pergunta"):
-                user_prompt = tmp
+        # Display chat history above input (Gemini/GPT style)
+        st.markdown("### Análise de Dados")
+        
+        # Container for chat history with custom styling
+        chat_container = st.container()
+        
+        with chat_container:
+            history = st.session_state.get('chat_history', [])
+            
+            if not history:
+                st.info("Bem-vindo! Faça sua primeira pergunta sobre os dados carregados.")
+            else:
+                # Render all messages in history
+                for msg in history:
+                    role = msg.get('role', 'assistant')
+                    text = msg.get('text', '')
+                    
+                    with st.chat_message(role if role in ("user", "assistant") else "assistant"):
+                        st.markdown(text)
+                
+                # Render any saved charts after messages
+                if 'charts' in st.session_state and st.session_state.charts:
+                    for idx, chart_item in enumerate(st.session_state.charts, start=1):
+                        if isinstance(chart_item, dict) and 'bytes' in chart_item:
+                            st.image(chart_item['bytes'], caption=chart_item.get('caption'))
+                            st.download_button(
+                                label=f"Download gráfico {idx}",
+                                data=chart_item['bytes'],
+                                file_name=f"chart_{idx}.png",
+                                mime="image/png",
+                                key=f"download_chart_{idx}_{len(history)}"
+                            )
+                        else:
+                            # Legacy path
+                            if isinstance(chart_item, str) and os.path.exists(chart_item):
+                                with open(chart_item, 'rb') as f:
+                                    img_bytes = f.read()
+                                st.image(img_bytes)
+                                st.download_button(
+                                    label=f"Download gráfico {idx}",
+                                    data=img_bytes,
+                                    file_name=os.path.basename(chart_item),
+                                    mime="image/png",
+                                    key=f"download_chart_legacy_{idx}_{len(history)}"
+                                )
+        
+        # Fixed input at bottom (Gemini/GPT style)
+        st.markdown("---")
+        user_prompt = st.chat_input("Digite sua pergunta sobre os dados...")
+        
+        # Process user input
         if user_prompt:
-            # Render user message bubble
-            with st.chat_message("user"):
-                st.markdown(user_prompt)
-            # Persist raw user message
-            conv = st.session_state.get('conversation', [])
-            conv.append({'role': 'user', 'text': user_prompt})
-            st.session_state['conversation'] = conv
-            # Append to unified chat history (user)
+            # Add user message to history
             ch = st.session_state.get('chat_history', [])
             ch.append({'role': 'user', 'text': user_prompt})
             st.session_state['chat_history'] = ch
-
+            
+            # Persist to conversation log
+            conv = st.session_state.get('conversation', [])
+            conv.append({'role': 'user', 'text': user_prompt})
+            st.session_state['conversation'] = conv
+            
             try:
                 llm = st.session_state.get('llm')
                 if llm is None:
                     # Fallback: initialize on demand
                     runtime_config = {
-                        'provider': provider,
-                        'model': model,
+                        'provider': st.session_state.get('runtime_config', {}).get('provider', 'groq'),
+                        'model': st.session_state.get('runtime_config', {}).get('model', 'llama-3.1-8b-instant'),
                         'api_key': st.session_state.get('api_key', ''),
                         'rpm_limit': st.session_state.get('rpm_limit', 10),
                     }
                     llm = obtain_llm(runtime_config)
                     st.session_state['llm'] = llm
-
+                
+                # Clear charts from previous run
+                if 'charts' in st.session_state:
+                    del st.session_state.charts
+                
                 pipeline = AnalysisPipeline(llm, st.session_state.dataframes, st.session_state.get('rpm_limit', 10))
                 pipeline.run(user_prompt)
+                
+                # Rerun to display new messages
+                st.rerun()
+                
             except Exception as e:
-                st.error(f"Erro durante a conversa: {e}")
+                error_msg = f"Erro durante a análise: {str(e)}"
+                st.error(error_msg)
+                # Add error to history
+                ch = st.session_state.get('chat_history', [])
+                ch.append({'role': 'assistant', 'text': f"**Erro:** {error_msg}"})
+                st.session_state['chat_history'] = ch
     else:
-        st.info("Para usar o chat, configure uma API Key válida e carregue ao menos um dataset.")
-
-    # Unified conversation history (chat-like) with reports and charts
-    with st.expander("Conversation History"):
-        history = st.session_state.get('chat_history', [])
-        if history:
-            for msg in history:
-                role = msg.get('role', 'assistant')
-                text = msg.get('text', '')
-                with st.chat_message(role if role in ("user", "assistant") else "assistant"):
-                    st.markdown(text)
-        else:
-            st.write("No history yet.")
-
-        # Render any saved charts
-        if 'charts' in st.session_state and st.session_state.charts:
-            for idx, chart_item in enumerate(st.session_state.charts, start=1):
-                if isinstance(chart_item, dict) and 'bytes' in chart_item:
-                    st.image(chart_item['bytes'], caption=chart_item.get('caption'))
-                    st.download_button(
-                        label=f"Download chart {idx}",
-                        data=chart_item['bytes'],
-                        file_name=f"chart_{idx}.png",
-                        mime="image/png",
-                    )
-                else:
-                    # Legacy path: check existence before trying to render
-                    if isinstance(chart_item, str) and os.path.exists(chart_item):
-                        with open(chart_item, 'rb') as f:
-                            img_bytes = f.read()
-                        st.image(img_bytes)
-                        st.download_button(
-                            label=f"Download chart {idx}",
-                            data=img_bytes,
-                            file_name=os.path.basename(chart_item),
-                            mime="image/png",
-                        )
-                    else:
-                        st.warning(f"Image not found (ignored): {chart_item}")
-            del st.session_state.charts  # Clear for next execution
+        st.info("Para iniciar o chat, configure uma API Key válida na sidebar e carregue ao menos um dataset.")
 
         # Render downloadable reports
         reports = st.session_state.get('reports', [])

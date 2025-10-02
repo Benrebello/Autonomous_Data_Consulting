@@ -63,6 +63,24 @@ SYNTHESIS_PROMPT = """
 Você é o Líder de Equipe de IA. Sua equipe executou um plano de análise e agora você tem os resultados.
 Sua missão é sintetizar todos os resultados intermediários em um rascunho de relatório coeso e técnico, incluindo conclusões sobre os dados.
 
+**CRÍTICO - Interpretação Correta de Correlações:**
+Ao analisar correlações, siga estas diretrizes RIGOROSAMENTE:
+- |r| < 0.1: Correlação NEGLIGÍVEL - NÃO mencione como tendência
+- 0.1 ≤ |r| < 0.3: Correlação FRACA - mencione com cautela
+- 0.3 ≤ |r| < 0.5: Correlação MODERADA
+- 0.5 ≤ |r| < 0.7: Correlação FORTE
+- |r| ≥ 0.7: Correlação MUITO FORTE
+
+SEMPRE verifique:
+1. O p-value: se p > 0.05, a correlação NÃO é estatisticamente significativa
+2. O tamanho da amostra (n): amostras pequenas (n < 30) são menos confiáveis
+3. Correlação ≠ Causalidade: NUNCA afirme que X causa Y baseado apenas em correlação
+
+Exemplos de interpretação CORRETA:
+- r = 0.05, p = 0.6: "Não há correlação significativa"
+- r = 0.21, p = 0.03: "Correlação fraca mas estatisticamente significativa"
+- r = -0.21, p = 0.04: "Correlação negativa fraca - outros fatores são mais importantes"
+
 **Resultados da Execução:**
 {execution_results}
 
@@ -86,6 +104,14 @@ Sua missão é traduzir este rascunho em uma resposta final clara, objetiva e ri
 7. Seja sucinto: forneça a resposta direta primeiro, evitando relatórios longos desnecessários.
 8. Ofereça análise detalhada apenas se o usuário solicitar explicitamente (ex: "forneça mais detalhes" ou "análise completa").
 9. Se a análise for necessária para responder, use-a internamente mas apresente apenas o essencial.
+
+**IMPORTANTE - Interpretação de Correlações:**
+- Correlação entre -0.3 e 0.3 é FRACA (weak) - não tire conclusões fortes
+- Correlação entre 0.3 e 0.5 (ou -0.3 e -0.5) é MODERADA
+- Correlação > 0.7 (ou < -0.7) é FORTE
+- SEMPRE verifique o p-value: se p > 0.05, a correlação NÃO é estatisticamente significativa
+- Correlação NÃO implica causalidade - sempre mencione outros fatores possíveis
+- Valores como 0.05, 0.10, 0.21 são correlações NEGLIGÍVEIS - não indique tendências baseadas neles
 
 **Rascunho Técnico:**
 {synthesis_report}

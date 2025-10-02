@@ -1,5 +1,5 @@
 {
     "provider": "google",
-    "model": "gemini-2.5-pro",
-    "rpm_limit": 60
+    "model": "gemini-2.5-flash-lite",
+    "rpm_limit": 39
 }

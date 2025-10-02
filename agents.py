@@ -4,7 +4,7 @@ import time
 from langchain.prompts import PromptTemplate
 from langchain.schema import BaseOutputParser
 from pydantic import BaseModel, Field, ValidationError
-from typing import Dict, Any, List, Optional, Literal
+from typing import Dict, Any, List, Optional, Literal, Callable
 import sys
 from pathlib import Path
 
@@ -13,8 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from prompts import (ORCHESTRATOR_PROMPT, TEAM_LEADER_PROMPT, 
                      SYNTHESIS_PROMPT, FINAL_RESPONSE_PROMPT)
+from prompt_templates import (get_orchestrator_prompt, get_team_leader_plan_prompt,
+                              get_synthesis_prompt, get_final_response_prompt)
+from rate_limiter import RateLimiter
 
-# Global for rate limiting
+# Global for rate limiting (legacy, kept for compatibility)
 last_call_time = 0
 
 def clean_json_response(response: str) -> str:
@@ -73,9 +76,15 @@ def clean_json_response(response: str) -> str:
     return s
 
 class BaseAgent:
-    def __init__(self, llm, rpm_limit=10):
+    def __init__(self, llm, rpm_limit=10, rate_limiter: Optional[RateLimiter] = None):
         self.llm = llm
         self.rpm_limit = rpm_limit
+        self.rate_limiter = rate_limiter or RateLimiter(rpm_limit=rpm_limit)
+        self.wait_callback: Optional[Callable[[dict], None]] = None
+    
+    def set_wait_callback(self, callback: Callable[[dict], None]):
+        """Set callback to be called when waiting for rate limit."""
+        self.wait_callback = callback
 
 
 class BriefingModel(BaseModel):
@@ -144,6 +153,30 @@ ToolName = Literal[
     "perform_survival_analysis",
     "topic_modeling",
     "perform_bayesian_inference",
+    # Extended tools
+    "data_profiling",
+    "missing_data_analysis",
+    "cardinality_analysis",
+    "distribution_tests",
+    "create_polynomial_features",
+    "create_interaction_features",
+    "create_binning",
+    "create_rolling_features",
+    "create_lag_features",
+    "correlation_tests",
+    "multicollinearity_detection",
+    "gradient_boosting_classifier",
+    "hyperparameter_tuning",
+    "feature_importance_analysis",
+    "model_evaluation_detailed",
+    "rfm_analysis",
+    "ab_test_analysis",
+    "export_to_excel",
+    "export_analysis_results",
+    # Data validation
+    "validate_and_clean_dataframe",
+    "smart_type_inference",
+    "detect_data_quality_issues",
 ]
 
 
@@ -164,17 +197,21 @@ class ExecutionPlanModel(BaseModel):
 
 class OrchestratorAgent(BaseAgent):
     def run(self, user_query: str) -> dict:
-        global last_call_time
-        current_time = time.time()
-        interval = 60 / self.rpm_limit
-        if current_time - last_call_time < interval:
-            time.sleep(interval - (current_time - last_call_time))
-        last_call_time = time.time()
+        # Use dynamic prompt with agent profile
+        prompt = get_orchestrator_prompt(user_query)
         
-        prompt = ORCHESTRATOR_PROMPT.format(user_query=user_query)
-        response = self.llm.invoke(prompt).content
-        if not response.strip():
-            raise ValueError("Empty response from LLM. Check API key and connectivity.")
+        # Execute with rate limiting and retry
+        def _execute():
+            response = self.llm.invoke(prompt).content
+            if not response.strip():
+                raise ValueError("Empty response from LLM. Check API key and connectivity.")
+            return response
+        
+        response = self.rate_limiter.execute_with_retry(
+            _execute,
+            max_retries=3,
+            on_wait=self.wait_callback
+        )
         response = clean_json_response(response)
         try:
             data = json.loads(response)
@@ -245,22 +282,26 @@ class OrchestratorAgent(BaseAgent):
 
 class TeamLeaderAgent(BaseAgent):
     def create_plan(self, briefing: dict) -> dict:
-        global last_call_time
-        current_time = time.time()
-        interval = 60 / self.rpm_limit
-        if current_time - last_call_time < interval:
-            time.sleep(interval - (current_time - last_call_time))
-        last_call_time = time.time()
-        
         # Try up to 2 correction rounds when validation fails
         error_note = None
         for attempt in range(3):
-            prompt = TEAM_LEADER_PROMPT.format(briefing=json.dumps(briefing, indent=2))
+            # Use dynamic prompt with agent profile
+            prompt = get_team_leader_plan_prompt(json.dumps(briefing, indent=2))
             if error_note:
                 prompt += f"\n\nATENÇÃO: O plano anterior era inválido pelos seguintes motivos de validação. Corrija e retorne APENAS JSON válido no schema exigido.\nErros: {error_note}\n"
-            response = self.llm.invoke(prompt).content
-            if not response.strip():
-                raise ValueError("Empty response from LLM. Check API key and connectivity.")
+            
+            # Execute with rate limiting
+            def _execute():
+                response = self.llm.invoke(prompt).content
+                if not response.strip():
+                    raise ValueError("Empty response from LLM. Check API key and connectivity.")
+                return response
+            
+            response = self.rate_limiter.execute_with_retry(
+                _execute,
+                max_retries=2,
+                on_wait=self.wait_callback
+            )
             response = clean_json_response(response)
             try:
                 data = json.loads(response)
@@ -279,16 +320,27 @@ class TeamLeaderAgent(BaseAgent):
             raise ValueError(f"Plano inválido após tentativas de correção: {error_note}")
         raise ValueError("Falha ao obter plano válido do LLM.")
         
-    def synthesize_results(self, execution_results: dict) -> str:
-        global last_call_time
-        current_time = time.time()
-        interval = 60 / self.rpm_limit
-        if current_time - last_call_time < interval:
-            time.sleep(interval - (current_time - last_call_time))
-        last_call_time = time.time()
+    def synthesize_results(self, execution_results: dict, tools_used: List[str] = None) -> str:
+        # Extract tools used from execution results if not provided
+        if tools_used is None:
+            tools_used = []
+            for task_result in execution_results.get('tasks', []):
+                tool = task_result.get('tool_used')
+                if tool and tool not in tools_used:
+                    tools_used.append(tool)
         
-        prompt = SYNTHESIS_PROMPT.format(execution_results=json.dumps(execution_results, default=str, indent=2))
-        return self.llm.invoke(prompt).content
+        # Use dynamic prompt with agent profile and tool context
+        prompt = get_synthesis_prompt(execution_results, tools_used=tools_used)
+        
+        # Execute with rate limiting
+        def _execute():
+            return self.llm.invoke(prompt).content
+        
+        return self.rate_limiter.execute_with_retry(
+            _execute,
+            max_retries=3,
+            on_wait=self.wait_callback
+        )
 
 # Specialist agents are simpler since their logic is to execute a tool
 class SpecialistAgent(BaseAgent):
@@ -299,15 +351,18 @@ class SpecialistAgent(BaseAgent):
 class DataArchitectAgent(SpecialistAgent): pass
 class DataAnalystTechnicalAgent(SpecialistAgent): pass
 class DataAnalystBusinessAgent(SpecialistAgent):
-    def generate_final_response(self, synthesis_report: str, memory_context: str):
-        global last_call_time
-        current_time = time.time()
-        interval = 60 / self.rpm_limit
-        if current_time - last_call_time < interval:
-            time.sleep(interval - (current_time - last_call_time))
-        last_call_time = time.time()
+    def generate_final_response(self, synthesis_report: str, memory_context: str, tools_used: List[str] = None):
+        # Use dynamic prompt with agent profile and tool context
+        prompt = get_final_response_prompt(synthesis_report, memory_context, tools_used=tools_used)
         
-        prompt = FINAL_RESPONSE_PROMPT.format(synthesis_report=synthesis_report, memory_context=memory_context)
-        return self.llm.stream(prompt) # Habilita o streaming
+        # Execute with rate limiting (streaming mode)
+        def _execute():
+            return self.llm.stream(prompt)
+        
+        return self.rate_limiter.execute_with_retry(
+            _execute,
+            max_retries=3,
+            on_wait=self.wait_callback
+        )
 
 class DataScientistAgent(SpecialistAgent): pass

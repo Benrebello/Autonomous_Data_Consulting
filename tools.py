@@ -19,7 +19,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
 import numpy as np
-from typing import Dict
+from typing import Dict, Any, List, Optional
 from odf.opendocument import load as odf_load
 from odf.table import Table, TableRow, TableCell
 from odf.text import P
@@ -57,7 +57,8 @@ def clean_data(df: pd.DataFrame, column: str, strategy: str = 'mean') -> pd.Data
         fill_value = df[column].median()
     else: # mode
         fill_value = df[column].mode()[0]
-    df[column].fillna(fill_value, inplace=True)
+    # Avoid chained assignment with inplace=True to prevent FutureWarning in pandas 3.0+
+    df[column] = df[column].fillna(fill_value)
     return df
 
 # Technical Analyst Tools (EDA)
@@ -108,16 +109,110 @@ def detect_outliers(df: pd.DataFrame, column: str, method: str = 'iqr') -> pd.Da
         df['outlier'] = pd.Series([bool(v) for v in mask.tolist()], dtype=object)
     return df
 
-def correlation_matrix(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates the correlation matrix for numeric columns."""
+def correlation_matrix(df: pd.DataFrame) -> Dict[str, Any]:
+    """Calculates the correlation matrix with statistical significance and interpretation.
+    
+    Returns correlation matrix with p-values and interpretation guidelines.
+    """
     numeric_df = df.select_dtypes(include=[np.number])
-    return numeric_df.corr()
+    
+    if numeric_df.shape[1] < 2:
+        return {
+            'error': 'Need at least 2 numeric columns for correlation analysis',
+            'available_columns': list(numeric_df.columns)
+        }
+    
+    # Calculate correlation matrix
+    corr_matrix = numeric_df.corr()
+    
+    # Calculate p-values for each correlation
+    n = len(numeric_df)
+    p_values = pd.DataFrame(np.zeros_like(corr_matrix), 
+                            columns=corr_matrix.columns, 
+                            index=corr_matrix.index)
+    
+    for i, col1 in enumerate(corr_matrix.columns):
+        for j, col2 in enumerate(corr_matrix.columns):
+            if i != j:
+                r = corr_matrix.iloc[i, j]
+                # Calculate t-statistic and p-value
+                t_stat = r * np.sqrt(n - 2) / np.sqrt(1 - r**2) if abs(r) < 1 else np.inf
+                p_val = 2 * (1 - stats.t.cdf(abs(t_stat), n - 2))
+                p_values.iloc[i, j] = p_val
+            else:
+                p_values.iloc[i, j] = 0.0
+    
+    # Identify significant correlations
+    significant_correlations = []
+    for i, col1 in enumerate(corr_matrix.columns):
+        for j, col2 in enumerate(corr_matrix.columns):
+            if i < j:  # Only upper triangle to avoid duplicates
+                r = corr_matrix.iloc[i, j]
+                p = p_values.iloc[i, j]
+                
+                # Interpret strength
+                abs_r = abs(r)
+                if abs_r < 0.1:
+                    strength = "negligible"
+                elif abs_r < 0.3:
+                    strength = "weak"
+                elif abs_r < 0.5:
+                    strength = "moderate"
+                elif abs_r < 0.7:
+                    strength = "strong"
+                else:
+                    strength = "very strong"
+                
+                direction = "positive" if r > 0 else "negative"
+                significant = p < 0.05
+                
+                significant_correlations.append({
+                    'variable1': col1,
+                    'variable2': col2,
+                    'correlation': float(r),
+                    'p_value': float(p),
+                    'significant': significant,
+                    'strength': strength,
+                    'direction': direction,
+                    'interpretation': f"{strength} {direction} correlation (r={r:.3f}, p={p:.4f})"
+                })
+    
+    # Sort by absolute correlation value
+    significant_correlations.sort(key=lambda x: abs(x['correlation']), reverse=True)
+    
+    return {
+        'correlation_matrix': corr_matrix.to_dict(),
+        'p_values': p_values.to_dict(),
+        'significant_correlations': significant_correlations,
+        'sample_size': n,
+        'interpretation_guide': {
+            'correlation_strength': {
+                '0.0-0.1': 'negligible',
+                '0.1-0.3': 'weak',
+                '0.3-0.5': 'moderate',
+                '0.5-0.7': 'strong',
+                '0.7-1.0': 'very strong'
+            },
+            'significance': 'p < 0.05 indicates statistically significant correlation',
+            'warning': 'Correlation does not imply causation. Always consider context and other factors.'
+        }
+    }
 
 def get_exploratory_analysis(df: pd.DataFrame) -> str:
     """Generates an Exploratory Data Analysis (EDA) report."""
     desc = descriptive_stats(df)
-    corr = correlation_matrix(df)
-    report = f"Shape: {desc['shape']}\nTypes: {desc['types']}\nStats: {desc['stats']}\nCorr: {corr.to_string()}"
+    corr_result = correlation_matrix(df)
+    
+    # Format correlation results
+    if 'error' in corr_result:
+        corr_str = f"Correlation: {corr_result['error']}"
+    else:
+        corr_str = f"Correlation Analysis (n={corr_result['sample_size']}):\n"
+        corr_str += "Top correlations:\n"
+        for corr in corr_result['significant_correlations'][:5]:
+            corr_str += f"  {corr['variable1']} vs {corr['variable2']}: {corr['interpretation']}\n"
+    
+    report = f"Shape: {desc['shape']}\nTypes: {desc['types']}\nStats: {desc['stats']}\n{corr_str}"
     return report
 
 # Business Analyst Tools (Visualizations)
@@ -914,7 +1009,8 @@ def fill_missing_with_median(df, columns):
     for col in columns:
         if col in df.columns:
             median_val = df[col].median()
-            df_filled[col].fillna(median_val, inplace=True)
+            # Avoid chained assignment with inplace=True to prevent FutureWarning in pandas 3.0+
+            df_filled[col] = df_filled[col].fillna(median_val)
     return df_filled
 
 def detect_and_remove_outliers(df, column, method='iqr', threshold=1.5):
@@ -1140,3 +1236,950 @@ def add_time_features_from_seconds(df, time_column, origin="2000-01-01"):
     df2[f"{time_column}_dayofweek"] = dt.dt.dayofweek
     df2[f"{time_column}_month"] = dt.dt.month
     return df2
+
+
+# ============================================================================
+# EXTENDED TOOLS - Advanced Data Analysis
+# ============================================================================
+
+# 1. DATA QUALITY & PROFILING
+
+def data_profiling(df: pd.DataFrame) -> Dict[str, Any]:
+    """Comprehensive data profiling with quality metrics.
+    
+    Returns detailed information about:
+    - Data types and memory usage
+    - Missing values patterns
+    - Cardinality
+    - Basic statistics
+    - Data quality score
+    """
+    profile = {
+        'shape': df.shape,
+        'memory_usage_mb': df.memory_usage(deep=True).sum() / 1024**2,
+        'columns': {}
+    }
+    
+    for col in df.columns:
+        col_profile = {
+            'dtype': str(df[col].dtype),
+            'missing_count': int(df[col].isna().sum()),
+            'missing_pct': float(df[col].isna().sum() / len(df) * 100),
+            'unique_count': int(df[col].nunique()),
+            'cardinality': float(df[col].nunique() / len(df)),
+        }
+        
+        # Numeric columns
+        if pd.api.types.is_numeric_dtype(df[col]):
+            col_profile.update({
+                'mean': float(df[col].mean()) if not df[col].isna().all() else None,
+                'std': float(df[col].std()) if not df[col].isna().all() else None,
+                'min': float(df[col].min()) if not df[col].isna().all() else None,
+                'max': float(df[col].max()) if not df[col].isna().all() else None,
+                'zeros_count': int((df[col] == 0).sum()),
+                'zeros_pct': float((df[col] == 0).sum() / len(df) * 100),
+            })
+        
+        # Categorical columns
+        elif pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_categorical_dtype(df[col]):
+            top_values = df[col].value_counts().head(5).to_dict()
+            col_profile.update({
+                'top_values': {str(k): int(v) for k, v in top_values.items()},
+                'mode': str(df[col].mode()[0]) if len(df[col].mode()) > 0 else None,
+            })
+        
+        profile['columns'][col] = col_profile
+    
+    # Overall quality score (0-100)
+    missing_score = 100 - (df.isna().sum().sum() / (df.shape[0] * df.shape[1]) * 100)
+    profile['quality_score'] = round(missing_score, 2)
+    
+    return profile
+
+
+def missing_data_analysis(df: pd.DataFrame) -> Dict[str, Any]:
+    """Detailed missing data analysis with patterns and recommendations."""
+    missing_summary = {
+        'total_missing': int(df.isna().sum().sum()),
+        'total_cells': int(df.shape[0] * df.shape[1]),
+        'missing_pct': float(df.isna().sum().sum() / (df.shape[0] * df.shape[1]) * 100),
+        'columns_with_missing': {},
+        'rows_with_missing': int(df.isna().any(axis=1).sum()),
+        'complete_rows': int((~df.isna().any(axis=1)).sum()),
+    }
+    
+    # Per column analysis
+    for col in df.columns:
+        if df[col].isna().sum() > 0:
+            missing_summary['columns_with_missing'][col] = {
+                'count': int(df[col].isna().sum()),
+                'pct': float(df[col].isna().sum() / len(df) * 100),
+                'recommendation': _get_imputation_recommendation(df, col)
+            }
+    
+    # Missing patterns (which columns tend to be missing together)
+    if len(missing_summary['columns_with_missing']) > 1:
+        missing_matrix = df.isna().astype(int)
+        pattern_counts = missing_matrix.value_counts().head(5)
+        missing_summary['common_patterns'] = {
+            str(idx): int(count) for idx, count in pattern_counts.items()
+        }
+    
+    return missing_summary
+
+
+def _get_imputation_recommendation(df: pd.DataFrame, column: str) -> str:
+    """Recommend imputation strategy based on data characteristics."""
+    missing_pct = df[column].isna().sum() / len(df) * 100
+    
+    if missing_pct > 50:
+        return "Consider dropping column (>50% missing)"
+    elif missing_pct > 20:
+        return "Use advanced imputation (KNN, iterative)"
+    elif pd.api.types.is_numeric_dtype(df[column]):
+        skew = df[column].skew()
+        if abs(skew) > 1:
+            return "Use median (skewed distribution)"
+        else:
+            return "Use mean (normal distribution)"
+    else:
+        return "Use mode or create 'missing' category"
+
+
+def cardinality_analysis(df: pd.DataFrame) -> Dict[str, Any]:
+    """Analyze cardinality of columns for encoding decisions."""
+    analysis = {}
+    
+    for col in df.columns:
+        unique_count = df[col].nunique()
+        cardinality = unique_count / len(df)
+        
+        # Classification
+        if cardinality < 0.01:
+            category = "Low cardinality (< 1%)"
+            encoding_rec = "One-hot encoding"
+        elif cardinality < 0.05:
+            category = "Medium cardinality (1-5%)"
+            encoding_rec = "Target encoding or frequency encoding"
+        elif cardinality < 0.5:
+            category = "High cardinality (5-50%)"
+            encoding_rec = "Target encoding or hashing"
+        else:
+            category = "Very high cardinality (>50%)"
+            encoding_rec = "Consider dropping or feature hashing"
+        
+        analysis[col] = {
+            'unique_count': int(unique_count),
+            'cardinality': float(cardinality),
+            'category': category,
+            'encoding_recommendation': encoding_rec
+        }
+    
+    return analysis
+
+
+def distribution_tests(df: pd.DataFrame, column: str) -> Dict[str, Any]:
+    """Test if data follows normal distribution."""
+    data = df[column].dropna()
+    
+    if len(data) < 3:
+        return {'error': 'Insufficient data for distribution tests'}
+    
+    results = {}
+    
+    # Shapiro-Wilk test (good for n < 5000)
+    if len(data) <= 5000:
+        stat, p_value = stats.shapiro(data)
+        results['shapiro_wilk'] = {
+            'statistic': float(stat),
+            'p_value': float(p_value),
+            'is_normal': bool(p_value > 0.05)
+        }
+    
+    # Kolmogorov-Smirnov test
+    stat, p_value = stats.kstest(data, 'norm', args=(data.mean(), data.std()))
+    results['kolmogorov_smirnov'] = {
+        'statistic': float(stat),
+        'p_value': float(p_value),
+        'is_normal': bool(p_value > 0.05)
+    }
+    
+    # D'Agostino-Pearson test
+    if len(data) >= 8:
+        stat, p_value = stats.normaltest(data)
+        results['dagostino_pearson'] = {
+            'statistic': float(stat),
+            'p_value': float(p_value),
+            'is_normal': bool(p_value > 0.05)
+        }
+    
+    # Descriptive measures
+    results['descriptive'] = {
+        'skewness': float(stats.skew(data)),
+        'kurtosis': float(stats.kurtosis(data)),
+        'interpretation': _interpret_distribution(stats.skew(data), stats.kurtosis(data))
+    }
+    
+    return results
+
+
+def _interpret_distribution(skewness: float, kurtosis: float) -> str:
+    """Interpret distribution shape."""
+    interp = []
+    
+    if abs(skewness) < 0.5:
+        interp.append("approximately symmetric")
+    elif skewness > 0:
+        interp.append("right-skewed (positive skew)")
+    else:
+        interp.append("left-skewed (negative skew)")
+    
+    if abs(kurtosis) < 0.5:
+        interp.append("normal tail behavior")
+    elif kurtosis > 0:
+        interp.append("heavy tails (leptokurtic)")
+    else:
+        interp.append("light tails (platykurtic)")
+    
+    return ", ".join(interp)
+
+
+# 2. FEATURE ENGINEERING
+
+def create_polynomial_features(df: pd.DataFrame, columns: List[str], degree: int = 2) -> pd.DataFrame:
+    """Create polynomial features up to specified degree."""
+    from sklearn.preprocessing import PolynomialFeatures
+    
+    df_result = df.copy()
+    poly = PolynomialFeatures(degree=degree, include_bias=False)
+    
+    poly_features = poly.fit_transform(df[columns])
+    feature_names = poly.get_feature_names_out(columns)
+    
+    # Add new features
+    for i, name in enumerate(feature_names):
+        if name not in columns:  # Skip original features
+            df_result[name] = poly_features[:, i]
+    
+    return df_result
+
+
+def create_interaction_features(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    """Create interaction features between specified columns."""
+    df_result = df.copy()
+    
+    for i in range(len(columns)):
+        for j in range(i + 1, len(columns)):
+            col1, col2 = columns[i], columns[j]
+            interaction_name = f"{col1}_x_{col2}"
+            df_result[interaction_name] = df[col1] * df[col2]
+    
+    return df_result
+
+
+def create_binning(df: pd.DataFrame, column: str, bins: int = 5, strategy: str = 'quantile') -> pd.DataFrame:
+    """Discretize continuous variable into bins."""
+    df_result = df.copy()
+    
+    if strategy == 'quantile':
+        df_result[f"{column}_binned"] = pd.qcut(df[column], q=bins, labels=False, duplicates='drop')
+    elif strategy == 'uniform':
+        df_result[f"{column}_binned"] = pd.cut(df[column], bins=bins, labels=False)
+    else:
+        raise ValueError("strategy must be 'quantile' or 'uniform'")
+    
+    return df_result
+
+
+def create_rolling_features(df: pd.DataFrame, column: str, windows: List[int] = [3, 7, 14]) -> pd.DataFrame:
+    """Create rolling statistics features for time series."""
+    df_result = df.copy()
+    
+    for window in windows:
+        df_result[f"{column}_rolling_mean_{window}"] = df[column].rolling(window=window).mean()
+        df_result[f"{column}_rolling_std_{window}"] = df[column].rolling(window=window).std()
+        df_result[f"{column}_rolling_min_{window}"] = df[column].rolling(window=window).min()
+        df_result[f"{column}_rolling_max_{window}"] = df[column].rolling(window=window).max()
+    
+    return df_result
+
+
+def create_lag_features(df: pd.DataFrame, column: str, lags: List[int] = [1, 7, 30]) -> pd.DataFrame:
+    """Create lag features for time series."""
+    df_result = df.copy()
+    
+    for lag in lags:
+        df_result[f"{column}_lag_{lag}"] = df[column].shift(lag)
+    
+    return df_result
+
+
+# 3. ADVANCED STATISTICAL ANALYSIS
+
+def correlation_tests(df: pd.DataFrame, col1: str, col2: str) -> Dict[str, Any]:
+    """Perform multiple correlation tests."""
+    data1 = df[col1].dropna()
+    data2 = df[col2].dropna()
+    
+    # Align data
+    common_idx = data1.index.intersection(data2.index)
+    data1 = data1.loc[common_idx]
+    data2 = data2.loc[common_idx]
+    
+    if len(data1) < 3:
+        return {'error': 'Insufficient data for correlation tests'}
+    
+    results = {}
+    
+    # Pearson (linear correlation)
+    r, p = stats.pearsonr(data1, data2)
+    results['pearson'] = {
+        'correlation': float(r),
+        'p_value': float(p),
+        'significant': bool(p < 0.05),
+        'interpretation': _interpret_correlation(r)
+    }
+    
+    # Spearman (monotonic correlation)
+    r, p = stats.spearmanr(data1, data2)
+    results['spearman'] = {
+        'correlation': float(r),
+        'p_value': float(p),
+        'significant': bool(p < 0.05),
+        'interpretation': _interpret_correlation(r)
+    }
+    
+    # Kendall (ordinal correlation)
+    tau, p = stats.kendalltau(data1, data2)
+    results['kendall'] = {
+        'correlation': float(tau),
+        'p_value': float(p),
+        'significant': bool(p < 0.05),
+        'interpretation': _interpret_correlation(tau)
+    }
+    
+    return results
+
+
+def _interpret_correlation(r: float) -> str:
+    """Interpret correlation coefficient."""
+    abs_r = abs(r)
+    
+    if abs_r < 0.1:
+        strength = "negligible"
+    elif abs_r < 0.3:
+        strength = "weak"
+    elif abs_r < 0.5:
+        strength = "moderate"
+    elif abs_r < 0.7:
+        strength = "strong"
+    else:
+        strength = "very strong"
+    
+    direction = "positive" if r > 0 else "negative"
+    
+    return f"{strength} {direction} correlation"
+
+
+def multicollinearity_detection(df: pd.DataFrame, columns: List[str]) -> Dict[str, Any]:
+    """Calculate VIF (Variance Inflation Factor) to detect multicollinearity."""
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
+    
+    X = df[columns].dropna()
+    
+    if X.shape[0] < X.shape[1] + 1:
+        return {'error': 'Insufficient samples for VIF calculation'}
+    
+    vif_data = {}
+    for i, col in enumerate(columns):
+        try:
+            vif = variance_inflation_factor(X.values, i)
+            vif_data[col] = {
+                'vif': float(vif),
+                'interpretation': _interpret_vif(vif)
+            }
+        except Exception as e:
+            vif_data[col] = {'error': str(e)}
+    
+    return vif_data
+
+
+def _interpret_vif(vif: float) -> str:
+    """Interpret VIF value."""
+    if vif < 5:
+        return "Low multicollinearity"
+    elif vif < 10:
+        return "Moderate multicollinearity - consider investigation"
+    else:
+        return "High multicollinearity - consider removing variable"
+
+
+# 4. ADVANCED MACHINE LEARNING
+
+def gradient_boosting_classifier(df: pd.DataFrame, x_columns: List[str], y_column: str, 
+                                n_estimators: int = 100, learning_rate: float = 0.1) -> Dict[str, Any]:
+    """Train Gradient Boosting classifier."""
+    from sklearn.ensemble import GradientBoostingClassifier
+    
+    X = df[x_columns].dropna()
+    y = df[y_column].loc[X.index]
+    
+    model = GradientBoostingClassifier(
+        n_estimators=n_estimators,
+        learning_rate=learning_rate,
+        random_state=42
+    )
+    model.fit(X, y)
+    
+    return {
+        'feature_importances': dict(zip(x_columns, model.feature_importances_.tolist())),
+        'score': float(model.score(X, y)),
+        'n_estimators': n_estimators,
+        'learning_rate': learning_rate
+    }
+
+
+def hyperparameter_tuning(df: pd.DataFrame, x_columns: List[str], y_column: str, 
+                         model_type: str = 'random_forest') -> Dict[str, Any]:
+    """Perform grid search for hyperparameter tuning."""
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import GridSearchCV
+    
+    X = df[x_columns].dropna()
+    y = df[y_column].loc[X.index]
+    
+    if model_type == 'random_forest':
+        model = RandomForestClassifier(random_state=42)
+        param_grid = {
+            'n_estimators': [50, 100, 200],
+            'max_depth': [5, 10, None],
+            'min_samples_split': [2, 5, 10]
+        }
+    elif model_type == 'logistic':
+        model = LogisticRegression(random_state=42, max_iter=1000)
+        param_grid = {
+            'C': [0.1, 1.0, 10.0],
+            'penalty': ['l1', 'l2'],
+            'solver': ['liblinear']
+        }
+    else:
+        return {'error': f'Unsupported model type: {model_type}'}
+    
+    grid_search = GridSearchCV(model, param_grid, cv=5, scoring='accuracy', n_jobs=-1)
+    grid_search.fit(X, y)
+    
+    return {
+        'best_params': grid_search.best_params_,
+        'best_score': float(grid_search.best_score_),
+        'all_results': {
+            str(params): float(score) 
+            for params, score in zip(grid_search.cv_results_['params'], 
+                                    grid_search.cv_results_['mean_test_score'])
+        }
+    }
+
+
+def feature_importance_analysis(df: pd.DataFrame, x_columns: List[str], y_column: str) -> Dict[str, Any]:
+    """Calculate feature importance using multiple methods."""
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.inspection import permutation_importance
+    
+    X = df[x_columns].dropna()
+    y = df[y_column].loc[X.index]
+    
+    # Train model
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X, y)
+    
+    # Built-in feature importance
+    builtin_importance = dict(zip(x_columns, model.feature_importances_.tolist()))
+    
+    # Permutation importance
+    perm_importance = permutation_importance(model, X, y, n_repeats=10, random_state=42)
+    perm_importance_dict = dict(zip(x_columns, perm_importance.importances_mean.tolist()))
+    
+    return {
+        'builtin_importance': builtin_importance,
+        'permutation_importance': perm_importance_dict,
+        'top_5_features': sorted(builtin_importance.items(), key=lambda x: x[1], reverse=True)[:5]
+    }
+
+
+def model_evaluation_detailed(model, X, y) -> Dict[str, Any]:
+    """Detailed model evaluation with multiple metrics."""
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix, classification_report
+    
+    y_pred = model.predict(X)
+    y_pred_proba = model.predict_proba(X)[:, 1] if hasattr(model, 'predict_proba') else None
+    
+    results = {
+        'accuracy': float(accuracy_score(y, y_pred)),
+        'precision': float(precision_score(y, y_pred, average='weighted', zero_division=0)),
+        'recall': float(recall_score(y, y_pred, average='weighted', zero_division=0)),
+        'f1_score': float(f1_score(y, y_pred, average='weighted', zero_division=0)),
+    }
+    
+    if y_pred_proba is not None and len(np.unique(y)) == 2:
+        results['roc_auc'] = float(roc_auc_score(y, y_pred_proba))
+    
+    # Confusion matrix
+    cm = confusion_matrix(y, y_pred)
+    results['confusion_matrix'] = cm.tolist()
+    
+    # Classification report
+    results['classification_report'] = classification_report(y, y_pred, output_dict=True, zero_division=0)
+    
+    return results
+
+
+# 5. BUSINESS ANALYTICS
+
+def rfm_analysis(df: pd.DataFrame, customer_col: str, date_col: str, 
+                value_col: str, reference_date: Optional[str] = None) -> pd.DataFrame:
+    """Perform RFM (Recency, Frequency, Monetary) analysis."""
+    if reference_date is None:
+        reference_date = df[date_col].max()
+    else:
+        reference_date = pd.to_datetime(reference_date)
+    
+    df_copy = df.copy()
+    df_copy[date_col] = pd.to_datetime(df_copy[date_col])
+    
+    rfm = df_copy.groupby(customer_col).agg({
+        date_col: lambda x: (reference_date - x.max()).days,  # Recency
+        customer_col: 'count',  # Frequency
+        value_col: 'sum'  # Monetary
+    })
+    
+    rfm.columns = ['Recency', 'Frequency', 'Monetary']
+    
+    # Create RFM scores (1-5)
+    rfm['R_Score'] = pd.qcut(rfm['Recency'], 5, labels=[5, 4, 3, 2, 1], duplicates='drop')
+    rfm['F_Score'] = pd.qcut(rfm['Frequency'].rank(method='first'), 5, labels=[1, 2, 3, 4, 5], duplicates='drop')
+    rfm['M_Score'] = pd.qcut(rfm['Monetary'], 5, labels=[1, 2, 3, 4, 5], duplicates='drop')
+    
+    # Combined RFM score
+    rfm['RFM_Score'] = rfm['R_Score'].astype(str) + rfm['F_Score'].astype(str) + rfm['M_Score'].astype(str)
+    
+    # Segment classification
+    rfm['Segment'] = rfm['RFM_Score'].apply(_classify_rfm_segment)
+    
+    return rfm.reset_index()
+
+
+def _classify_rfm_segment(score: str) -> str:
+    """Classify customer segment based on RFM score."""
+    r, f, m = int(score[0]), int(score[1]), int(score[2])
+    
+    if r >= 4 and f >= 4 and m >= 4:
+        return "Champions"
+    elif r >= 3 and f >= 3 and m >= 3:
+        return "Loyal Customers"
+    elif r >= 4 and f <= 2:
+        return "New Customers"
+    elif r <= 2 and f >= 3:
+        return "At Risk"
+    elif r <= 2 and f <= 2:
+        return "Lost"
+    else:
+        return "Potential Loyalists"
+
+
+def ab_test_analysis(df: pd.DataFrame, group_col: str, metric_col: str) -> Dict[str, Any]:
+    """Analyze A/B test results with statistical significance."""
+    groups = df[group_col].unique()
+    
+    if len(groups) != 2:
+        return {'error': 'A/B test requires exactly 2 groups'}
+    
+    group_a = df[df[group_col] == groups[0]][metric_col].dropna()
+    group_b = df[df[group_col] == groups[1]][metric_col].dropna()
+    
+    # T-test
+    t_stat, p_value = stats.ttest_ind(group_a, group_b)
+    
+    # Effect size (Cohen's d)
+    pooled_std = np.sqrt(((len(group_a) - 1) * group_a.std()**2 + 
+                          (len(group_b) - 1) * group_b.std()**2) / 
+                         (len(group_a) + len(group_b) - 2))
+    cohens_d = (group_a.mean() - group_b.mean()) / pooled_std
+    
+    # Confidence intervals
+    ci_a = stats.t.interval(0.95, len(group_a)-1, loc=group_a.mean(), scale=stats.sem(group_a))
+    ci_b = stats.t.interval(0.95, len(group_b)-1, loc=group_b.mean(), scale=stats.sem(group_b))
+    
+    return {
+        'group_a': {
+            'name': str(groups[0]),
+            'mean': float(group_a.mean()),
+            'std': float(group_a.std()),
+            'count': int(len(group_a)),
+            'ci_95': [float(ci_a[0]), float(ci_a[1])]
+        },
+        'group_b': {
+            'name': str(groups[1]),
+            'mean': float(group_b.mean()),
+            'std': float(group_b.std()),
+            'count': int(len(group_b)),
+            'ci_95': [float(ci_b[0]), float(ci_b[1])]
+        },
+        'test_results': {
+            't_statistic': float(t_stat),
+            'p_value': float(p_value),
+            'significant': bool(p_value < 0.05),
+            'cohens_d': float(cohens_d),
+            'effect_size': _interpret_effect_size(cohens_d)
+        },
+        'recommendation': _ab_test_recommendation(p_value, cohens_d, group_a.mean(), group_b.mean())
+    }
+
+
+def _interpret_effect_size(d: float) -> str:
+    """Interpret Cohen's d effect size."""
+    abs_d = abs(d)
+    if abs_d < 0.2:
+        return "negligible"
+    elif abs_d < 0.5:
+        return "small"
+    elif abs_d < 0.8:
+        return "medium"
+    else:
+        return "large"
+
+
+def _ab_test_recommendation(p_value: float, cohens_d: float, mean_a: float, mean_b: float) -> str:
+    """Provide recommendation based on A/B test results."""
+    if p_value >= 0.05:
+        return "No significant difference detected. Consider running test longer or with larger sample."
+    
+    winner = "B" if mean_b > mean_a else "A"
+    effect = _interpret_effect_size(cohens_d)
+    
+    return f"Group {winner} performs significantly better with {effect} effect size. Consider implementing."
+
+
+# 6. DATA VALIDATION & AUTO-CORRECTION
+
+def validate_and_clean_dataframe(df: pd.DataFrame, aggressive: bool = False) -> Dict[str, Any]:
+    """Comprehensive data validation and automatic cleaning.
+    
+    Detects and fixes common issues:
+    - String values in numeric columns (e.g., '97 min' -> 97.0)
+    - Mixed types in columns
+    - Invalid numeric formats
+    - Date/time parsing issues
+    - Encoding problems
+    
+    Args:
+        df: DataFrame to validate and clean
+        aggressive: If True, applies more aggressive cleaning (may lose data)
+    
+    Returns:
+        Dict with cleaned DataFrame and detailed report
+    """
+    df_clean = df.copy()
+    report = {
+        'original_shape': df.shape,
+        'issues_found': [],
+        'corrections_applied': [],
+        'columns_modified': {},
+        'warnings': []
+    }
+    
+    for col in df_clean.columns:
+        col_issues = []
+        col_corrections = []
+        
+        # Skip if all null
+        if df_clean[col].isna().all():
+            report['warnings'].append(f"{col}: All values are null")
+            continue
+        
+        # Check for mixed types
+        non_null_values = df_clean[col].dropna()
+        if len(non_null_values) == 0:
+            continue
+            
+        types_found = set(type(v).__name__ for v in non_null_values.head(100))
+        
+        if len(types_found) > 1:
+            col_issues.append(f"Mixed types: {types_found}")
+        
+        # Try to detect and fix numeric columns with string contamination
+        if df_clean[col].dtype == 'object':
+            # Sample values to check if should be numeric
+            sample = non_null_values.head(50)
+            numeric_like = 0
+            
+            for val in sample:
+                val_str = str(val).strip()
+                # Check for patterns like "97 min", "1.5k", "$100", "50%"
+                if re.search(r'[\d,\.]+', val_str):
+                    numeric_like += 1
+            
+            # If most values look numeric, try to clean
+            if numeric_like / len(sample) > 0.7:
+                col_issues.append("Numeric values stored as strings")
+                
+                def clean_numeric_string(val):
+                    """Extract numeric value from string."""
+                    if pd.isna(val):
+                        return np.nan
+                    
+                    val_str = str(val).strip()
+                    
+                    # Remove common units and symbols
+                    val_str = re.sub(r'[^\d\.\-\+eE,]', '', val_str)
+                    val_str = val_str.replace(',', '')
+                    
+                    try:
+                        return float(val_str) if val_str else np.nan
+                    except:
+                        return np.nan
+                
+                cleaned_series = df_clean[col].apply(clean_numeric_string)
+                
+                # Check if cleaning was successful
+                valid_conversions = cleaned_series.notna().sum()
+                total_non_null = non_null_values.count()
+                
+                if valid_conversions / total_non_null > 0.8:
+                    df_clean[col] = cleaned_series
+                    col_corrections.append(f"Converted to numeric ({valid_conversions}/{total_non_null} values)")
+                else:
+                    report['warnings'].append(
+                        f"{col}: Could not reliably convert to numeric "
+                        f"({valid_conversions}/{total_non_null} successful)"
+                    )
+        
+        # Try to detect and parse dates
+        if df_clean[col].dtype == 'object' and not aggressive:
+            sample = non_null_values.head(20)
+            date_like = sum(1 for v in sample if re.search(r'\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4}', str(v)))
+            
+            if date_like / len(sample) > 0.5:
+                col_issues.append("Potential date column stored as string")
+                try:
+                    df_clean[col] = pd.to_datetime(df_clean[col], errors='coerce')
+                    col_corrections.append("Converted to datetime")
+                except:
+                    report['warnings'].append(f"{col}: Failed to convert to datetime")
+        
+        # Check for whitespace issues
+        if df_clean[col].dtype == 'object':
+            has_leading_trailing = any(
+                str(v) != str(v).strip() 
+                for v in non_null_values.head(50) 
+                if pd.notna(v)
+            )
+            
+            if has_leading_trailing:
+                col_issues.append("Leading/trailing whitespace detected")
+                df_clean[col] = df_clean[col].apply(lambda x: x.strip() if isinstance(x, str) else x)
+                col_corrections.append("Removed whitespace")
+        
+        # Check for encoding issues
+        if df_clean[col].dtype == 'object':
+            sample_str = ' '.join(str(v) for v in non_null_values.head(20))
+            if any(ord(c) > 127 for c in sample_str):
+                # Has non-ASCII characters - might be encoding issue
+                try:
+                    df_clean[col] = df_clean[col].apply(
+                        lambda x: x.encode('latin1').decode('utf-8') if isinstance(x, str) else x
+                    )
+                    col_corrections.append("Fixed encoding issues")
+                except:
+                    pass
+        
+        # Store findings
+        if col_issues:
+            report['issues_found'].extend([f"{col}: {issue}" for issue in col_issues])
+        if col_corrections:
+            report['corrections_applied'].extend([f"{col}: {corr}" for corr in col_corrections])
+            report['columns_modified'][col] = col_corrections
+    
+    report['final_shape'] = df_clean.shape
+    report['success'] = len(report['corrections_applied']) > 0 or len(report['issues_found']) == 0
+    
+    return {
+        'dataframe': df_clean,
+        'report': report
+    }
+
+
+def smart_type_inference(df: pd.DataFrame) -> pd.DataFrame:
+    """Intelligently infer and convert column types.
+    
+    More aggressive than validate_and_clean_dataframe.
+    Useful when data types are completely wrong.
+    """
+    df_result = df.copy()
+    
+    for col in df_result.columns:
+        if df_result[col].dtype == 'object':
+            # Try numeric first
+            try:
+                # Remove common non-numeric characters
+                cleaned = df_result[col].astype(str).str.replace(r'[^\d\.\-\+eE]', '', regex=True)
+                numeric_series = pd.to_numeric(cleaned, errors='coerce')
+                
+                # If more than 80% converted successfully, use it
+                if numeric_series.notna().sum() / len(df_result) > 0.8:
+                    df_result[col] = numeric_series
+                    continue
+            except:
+                pass
+            
+            # Try datetime
+            try:
+                datetime_series = pd.to_datetime(df_result[col], errors='coerce')
+                if datetime_series.notna().sum() / len(df_result) > 0.8:
+                    df_result[col] = datetime_series
+                    continue
+            except:
+                pass
+            
+            # Try boolean
+            unique_vals = df_result[col].dropna().unique()
+            if len(unique_vals) <= 2:
+                bool_map = {
+                    'true': True, 'false': False,
+                    'yes': True, 'no': False,
+                    '1': True, '0': False,
+                    't': True, 'f': False,
+                    'y': True, 'n': False
+                }
+                try:
+                    df_result[col] = df_result[col].str.lower().map(bool_map)
+                    if df_result[col].notna().sum() / len(df_result) > 0.8:
+                        continue
+                except:
+                    pass
+    
+    return df_result
+
+
+def detect_data_quality_issues(df: pd.DataFrame) -> Dict[str, Any]:
+    """Detect data quality issues without modifying data.
+    
+    Returns comprehensive report of potential problems.
+    """
+    issues = {
+        'critical': [],
+        'warnings': [],
+        'info': [],
+        'recommendations': []
+    }
+    
+    # Check for empty DataFrame
+    if df.empty:
+        issues['critical'].append("DataFrame is empty")
+        return issues
+    
+    # Check for duplicate rows
+    dup_count = df.duplicated().sum()
+    if dup_count > 0:
+        dup_pct = (dup_count / len(df)) * 100
+        if dup_pct > 10:
+            issues['warnings'].append(f"High duplicate rate: {dup_count} rows ({dup_pct:.1f}%)")
+        else:
+            issues['info'].append(f"Duplicates found: {dup_count} rows ({dup_pct:.1f}%)")
+    
+    # Check each column
+    for col in df.columns:
+        # Missing data
+        missing_pct = (df[col].isna().sum() / len(df)) * 100
+        if missing_pct > 50:
+            issues['critical'].append(f"{col}: {missing_pct:.1f}% missing data")
+        elif missing_pct > 20:
+            issues['warnings'].append(f"{col}: {missing_pct:.1f}% missing data")
+        
+        # Check for constant columns
+        if df[col].nunique() == 1:
+            issues['warnings'].append(f"{col}: Constant column (only one unique value)")
+        
+        # Check for high cardinality in object columns
+        if df[col].dtype == 'object':
+            cardinality = df[col].nunique() / len(df)
+            if cardinality > 0.9:
+                issues['info'].append(f"{col}: Very high cardinality ({cardinality:.1%})")
+        
+        # Check for potential type issues
+        if df[col].dtype == 'object':
+            sample = df[col].dropna().head(50)
+            if len(sample) > 0:
+                # Check if looks numeric
+                numeric_pattern = sum(1 for v in sample if re.search(r'^\s*[\d\.\-\+eE,]+\s*[a-zA-Z]*\s*$', str(v)))
+                if numeric_pattern / len(sample) > 0.7:
+                    issues['recommendations'].append(
+                        f"{col}: Appears to contain numeric values stored as strings"
+                    )
+                
+                # Check if looks like dates
+                date_pattern = sum(1 for v in sample if re.search(r'\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4}', str(v)))
+                if date_pattern / len(sample) > 0.5:
+                    issues['recommendations'].append(
+                        f"{col}: Appears to contain dates stored as strings"
+                    )
+    
+    # Overall recommendations
+    if any('numeric values stored as strings' in r for r in issues['recommendations']):
+        issues['recommendations'].append(
+            "Run validate_and_clean_dataframe() to automatically fix type issues"
+        )
+    
+    return issues
+
+
+# 7. DATA EXPORT
+
+def export_to_excel(df: pd.DataFrame, filename: str = "export.xlsx", 
+                   sheet_name: str = "Data") -> bytes:
+    """Export DataFrame to Excel with formatting."""
+    from io import BytesIO
+    
+    output = BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name=sheet_name, index=False)
+        
+        # Get workbook and worksheet
+        workbook = writer.book
+        worksheet = writer.sheets[sheet_name]
+        
+        # Auto-adjust column widths
+        for column in worksheet.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            worksheet.column_dimensions[column_letter].width = adjusted_width
+    
+    output.seek(0)
+    return output.getvalue()
+
+
+def export_analysis_results(results: Dict[str, Any], filename: str = "analysis_results.xlsx") -> bytes:
+    """Export analysis results to formatted Excel file."""
+    from io import BytesIO
+    
+    output = BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Convert dict results to DataFrames and write to different sheets
+        for sheet_name, data in results.items():
+            if isinstance(data, pd.DataFrame):
+                data.to_excel(writer, sheet_name=sheet_name[:31], index=False)  # Excel sheet name limit
+            elif isinstance(data, dict):
+                df = pd.DataFrame([data]).T
+                df.columns = ['Value']
+                df.to_excel(writer, sheet_name=sheet_name[:31])
+    
+    output.seek(0)
+    return output.getvalue()

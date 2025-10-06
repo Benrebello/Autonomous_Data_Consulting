@@ -37,23 +37,61 @@ Para EDA, inclua tarefas para descrição dos dados, identificação de padrões
 - `DataAnalystBusinessAgent`: Cria gráficos, calcula KPIs e traduz dados em insights.
 - `DataScientistAgent`: Aplica machine learning para clusters e previsões.
 
+**VALIDAÇÃO INTELIGENTE DE FERRAMENTAS:**
+Antes de escolher uma ferramenta, considere os requisitos de dados:
+
+1. **Ferramentas de Correlação** (correlation_matrix, multicollinearity_detection):
+   - Requerem pelo menos 2 colunas numéricas
+   - Não use se o dataset tiver apenas 1 coluna numérica
+
+2. **Ferramentas de Comparação de Grupos** (perform_t_test, perform_anova):
+   - Requerem pelo menos 1 coluna numérica E 1 coluna categórica
+   - Não use se não houver grupos para comparar
+
+3. **Ferramentas de Machine Learning** (random_forest, xgboost, lightgbm):
+   - Requerem pelo menos 50 linhas de dados
+   - Requerem múltiplas features numéricas
+   - Para classificação, precisa de coluna target categórica
+
+4. **Ferramentas de Clustering** (run_kmeans_clustering):
+   - Requerem pelo menos 2 colunas numéricas
+   - Requerem pelo menos 20 linhas de dados
+
+5. **Análise de Séries Temporais** (decompose_time_series, forecast_arima):
+   - Requerem pelo menos 30 observações
+   - Requerem coluna de data/tempo
+
+6. **Análise de Negócios** (cohort_analysis, customer_lifetime_value, rfm_analysis):
+   - Requerem colunas de cliente, data e valor
+   - Requerem pelo menos 30 transações
+
+**ESCOLHA INTELIGENTE DE MODELOS ML:**
+Para tarefas de classificação/regressão, priorize modelos modernos:
+- **XGBoost** (`xgboost_classifier`): Estado da arte, excelente performance
+- **LightGBM** (`lightgbm_classifier`): Muito rápido, ótimo para datasets grandes
+- **Model Comparison** (`model_comparison`): Compare múltiplos modelos automaticamente
+- **Random Forest**: Boa baseline, interpretável
+- **Gradient Boosting**: Alternativa robusta
+
 **Regras (SAÍDA JSON ESTRITA):**
 1. Para EDA, decomponha em tarefas atômicas: estatísticas descritivas, gráficos, detecção de outliers, correlações, clusters.
 2. Inclua tarefa final para síntese e conclusões.
-3. Retorne APENAS o plano em formato JSON VÁLIDO, sem qualquer texto extra e SEM cercas markdown (não use ```).
-4. O JSON DEVE conter a chave "execution_plan" com uma lista de tarefas no seguinte schema exato:
+3. VALIDE se o dataset tem dados suficientes para cada ferramenta escolhida.
+4. Retorne APENAS o plano em formato JSON VÁLIDO, sem qualquer texto extra e SEM cercas markdown (não use ```).
+5. O JSON DEVE conter a chave "execution_plan" com uma lista de tarefas no seguinte schema exato:
     execution_plan: [
       {{
         "task_id": <int sequencial a partir de 1>,
         "description": "Descrição curta da tarefa",
         "agent_responsible": "Um destes: DataArchitectAgent | DataAnalystTechnicalAgent | DataAnalystBusinessAgent | DataScientistAgent",
-        "tool_to_use": "Uma destas: clean_data | descriptive_stats | detect_outliers | correlation_matrix | get_exploratory_analysis | plot_histogram | plot_boxplot | plot_scatter | generate_chart | run_kmeans_clustering | get_data_types | get_central_tendency | get_variability | get_ranges | get_value_counts | get_frequent_values | get_temporal_patterns | get_clusters_summary | get_outliers_summary | get_variable_relations | get_influential_variables | perform_t_test | perform_chi_square | linear_regression | logistic_regression | random_forest_classifier | normalize_data | impute_missing | pca_dimensionality | decompose_time_series | compare_datasets | plot_heatmap | evaluate_model | forecast_arima | perform_anova | check_duplicates | select_features | generate_wordcloud | plot_line_chart | plot_violin_plot | perform_kruskal_wallis | svm_classifier | knn_classifier | sentiment_analysis | plot_geospatial_map | perform_survival_analysis | topic_modeling | perform_bayesian_inference",
+        "tool_to_use": "Uma destas: {tools_list}",
         "dependencies": [],
         "inputs": {{}},
         "output_variable": "result_<task_id>"
       }}
     ]
-5. Use "inputs": {{}} quando não tiver certeza; o sistema preencherá padrões automaticamente.
+6. Use "inputs": {{}} quando não tiver certeza; o sistema preencherá padrões automaticamente.
+7. EVITE ferramentas que requerem dados não disponíveis (ex: não use correlation_matrix se houver apenas 1 coluna numérica).
 
 **Briefing do Projeto:**
 {briefing}

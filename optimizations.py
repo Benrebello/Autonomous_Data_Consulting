@@ -13,6 +13,7 @@ from collections import defaultdict
 import streamlit as st
 
 
+
 # ============================================================================
 # 1. PARALELIZAÇÃO DE TAREFAS
 # ============================================================================
@@ -226,6 +227,25 @@ class MetricsCollector:
             self.task_success[task_name] += 1
         else:
             self.task_errors[task_name] += 1
+    
+    def record_tool_execution(
+        self,
+        tool_name: str,
+        success: bool,
+        duration: float,
+        inputs: Dict[str, Any],
+        error: Optional[str] = None
+    ):
+        """Record tool execution with detailed parameters.
+        
+        Args:
+            tool_name: Name of the tool executed
+            success: Whether execution succeeded
+            duration: Execution duration in seconds
+            inputs: Input parameters used
+            error: Error message if failed
+        """
+        self.track_task_execution(tool_name, duration, success, error)
     
     def get_performance_report(self) -> Dict[str, Any]:
         """Generate performance report."""
@@ -514,3 +534,219 @@ def get_metrics_collector() -> MetricsCollector:
     if _metrics_collector is None:
         _metrics_collector = MetricsCollector()
     return _metrics_collector
+
+
+# ============================================================================
+# EXECUTION ENGINE - Abstracts task execution logic from app.py
+# ============================================================================
+
+class ExecutionEngine:
+    """Manages task execution with dependency resolution, retries, and error handling.
+    
+    This class encapsulates the complex execution logic previously embedded in app.py,
+    making it reusable, testable, and maintainable.
+    """
+    
+    def __init__(self, tool_mapping: Dict[str, Callable], shared_context: Dict[str, Any],
+                 metrics_collector: Optional[MetricsCollector] = None):
+        """Initialize execution engine.
+        
+        Args:
+            tool_mapping: Dictionary mapping tool names to functions
+            shared_context: Shared context for storing results
+            metrics_collector: Optional metrics collector for tracking
+        """
+        self.tool_mapping = tool_mapping
+        self.shared_context = shared_context
+        self.metrics = metrics_collector or get_metrics_collector()
+        self.execution_log = []
+    
+    def execute_plan(self, plan: Dict[str, Any], resolve_inputs_fn: Callable,
+                     fill_defaults_fn: Callable, max_retries: int = 1) -> Dict[str, Any]:
+        """Execute a complete execution plan with dependency management.
+        
+        Args:
+            plan: Execution plan with tasks
+            resolve_inputs_fn: Function to resolve input references
+            fill_defaults_fn: Function to fill default parameters
+            max_retries: Maximum number of retries per task
+        
+        Returns:
+            Dictionary with execution results and statistics
+        """
+        tasks = plan.get('execution_plan', [])
+        if not tasks:
+            return {'error': 'No tasks in plan', 'completed': [], 'failed': []}
+        
+        completed_tasks = []
+        failed_tasks = []
+        task_results = {}
+        retry_count = {}
+        
+        # Build dependency graph
+        dependencies = self._build_dependency_graph(tasks)
+        
+        # Execute tasks respecting dependencies
+        max_iterations = len(tasks) * (max_retries + 1)
+        iteration = 0
+        
+        while len(completed_tasks) + len(failed_tasks) < len(tasks) and iteration < max_iterations:
+            iteration += 1
+            made_progress = False
+            
+            for task in tasks:
+                task_id = task.get('task_id', f"task_{tasks.index(task)}")
+                
+                # Skip if already processed
+                if task_id in completed_tasks or task_id in failed_tasks:
+                    continue
+                
+                # Check if dependencies are satisfied
+                deps = dependencies.get(task_id, [])
+                if not all(dep in completed_tasks for dep in deps):
+                    continue
+                
+                # Execute task
+                result = self._execute_single_task(
+                    task, resolve_inputs_fn, fill_defaults_fn
+                )
+                
+                if result.get('status') == 'success':
+                    completed_tasks.append(task_id)
+                    task_results[task_id] = result
+                    made_progress = True
+                else:
+                    # Check retry limit
+                    retry_count[task_id] = retry_count.get(task_id, 0) + 1
+                    if retry_count[task_id] > max_retries:
+                        failed_tasks.append(task_id)
+                        task_results[task_id] = result
+                        made_progress = True
+                        
+                        # Invalidate dependent tasks
+                        self._invalidate_dependents(task_id, dependencies, completed_tasks)
+            
+            if not made_progress:
+                break
+        
+        return {
+            'completed': completed_tasks,
+            'failed': failed_tasks,
+            'results': task_results,
+            'execution_log': self.execution_log
+        }
+    
+    def _build_dependency_graph(self, tasks: List[Dict]) -> Dict[str, List[str]]:
+        """Build dependency graph from tasks.
+        
+        Args:
+            tasks: List of task dictionaries
+        
+        Returns:
+            Dictionary mapping task_id to list of dependency task_ids
+        """
+        graph = {}
+        for task in tasks:
+            task_id = task.get('task_id', f"task_{tasks.index(task)}")
+            deps = task.get('dependencies', [])
+            graph[task_id] = deps if isinstance(deps, list) else []
+        return graph
+    
+    def _execute_single_task(self, task: Dict, resolve_inputs_fn: Callable,
+                            fill_defaults_fn: Callable) -> Dict[str, Any]:
+        """Execute a single task.
+        
+        Args:
+            task: Task dictionary
+            resolve_inputs_fn: Function to resolve input references
+            fill_defaults_fn: Function to fill defaults
+        
+        Returns:
+            Result dictionary with status and output
+        """
+        tool_name = task.get('tool_to_use')
+        task_id = task.get('task_id', 'unknown')
+        
+        if not tool_name or tool_name not in self.tool_mapping:
+            return {
+                'status': 'error',
+                'error': f'Tool {tool_name} not found',
+                'task_id': task_id
+            }
+        
+        try:
+            # Get tool function
+            tool_fn = self.tool_mapping[tool_name]
+            
+            # Fill defaults and resolve inputs
+            inputs = task.get('inputs', {})
+            inputs = fill_defaults_fn(tool_name, inputs)
+            resolved_inputs = resolve_inputs_fn(inputs)
+            
+            # Execute tool
+            start_time = time.time()
+            result = tool_fn(**resolved_inputs)
+            execution_time = time.time() - start_time
+            
+            # Store result in shared context
+            output_var = task.get('output_variable', f"{tool_name}_result")
+            self.shared_context[output_var] = result
+            
+            # Log execution
+            self.execution_log.append({
+                'task_id': task_id,
+                'tool': tool_name,
+                'status': 'success',
+                'execution_time': execution_time,
+                'output_variable': output_var
+            })
+            
+            # Track metrics
+            self.metrics.record_tool_execution(tool_name, True, execution_time, resolved_inputs)
+            
+            return {
+                'status': 'success',
+                'result': result,
+                'task_id': task_id,
+                'output_variable': output_var,
+                'execution_time': execution_time
+            }
+            
+        except Exception as e:
+            error_msg = str(e)
+            
+            # Log error
+            self.execution_log.append({
+                'task_id': task_id,
+                'tool': tool_name,
+                'status': 'error',
+                'error': error_msg
+            })
+            
+            # Track metrics
+            self.metrics.record_tool_execution(tool_name, False, 0, {}, error_msg)
+            
+            return {
+                'status': 'error',
+                'error': error_msg,
+                'task_id': task_id,
+                'tool': tool_name
+            }
+    
+    def _invalidate_dependents(self, failed_task_id: str, dependencies: Dict[str, List[str]],
+                               completed_tasks: List[str]) -> None:
+        """Invalidate tasks that depend on a failed task.
+        
+        Args:
+            failed_task_id: ID of the failed task
+            dependencies: Dependency graph
+            completed_tasks: List of completed task IDs (modified in place)
+        """
+        # Find all tasks that depend on the failed task
+        dependents = [tid for tid, deps in dependencies.items() if failed_task_id in deps]
+        
+        for dependent_id in dependents:
+            if dependent_id in completed_tasks:
+                completed_tasks.remove(dependent_id)
+                # Recursively invalidate
+                self._invalidate_dependents(dependent_id, dependencies, completed_tasks)

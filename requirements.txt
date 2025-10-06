@@ -19,3 +19,8 @@ textblob
 wordcloud
 lifelines
 pytest
+xlsxwriter
+
+# Optional: State-of-the-art ML (install for best performance)
+xgboost
+lightgbm

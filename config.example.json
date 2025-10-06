@@ -1,0 +1,6 @@
+{
+    "provider": "groq",
+    "model": "llama-3.1-8b-instant",
+    "api_key": "YOUR_API_KEY_HERE",
+    "rpm_limit": 10
+}

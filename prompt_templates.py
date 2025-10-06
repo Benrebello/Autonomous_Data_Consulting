@@ -547,13 +547,19 @@ def get_orchestrator_prompt(user_query: str) -> str:
     )
 
 
-def get_team_leader_plan_prompt(briefing: str) -> str:
-    """Get team leader planning prompt with agent profile."""
+def get_team_leader_plan_prompt(briefing: str, tools_list: str = "") -> str:
+    """Get team leader planning prompt with agent profile and dynamic tools list.
+    
+    Args:
+        briefing: The project briefing JSON string
+        tools_list: Pipe-separated tools list to inject into the prompt
+    """
     from prompts import TEAM_LEADER_PROMPT
     return build_prompt_with_context(
         "TeamLeaderAgent",
         TEAM_LEADER_PROMPT,
-        briefing=briefing
+        briefing=briefing,
+        tools_list=tools_list
     )
 
 

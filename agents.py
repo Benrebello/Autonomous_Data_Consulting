@@ -27,9 +27,16 @@ def clean_json_response(response: str) -> str:
     - Prefixed text (e.g., "Plano em JSON:")
     - Markdown fences ```json ... ```
     - Trailing commentary after the JSON
+    - Truncated responses (incomplete JSON)
     Returns the JSON substring if a balanced object is found; otherwise returns the trimmed original.
     """
     s = response.strip()
+    
+    # Limit response size to prevent memory issues with very large responses
+    max_response_size = 500000  # 500KB
+    if len(s) > max_response_size:
+        s = s[:max_response_size]
+    
     # Remove markdown fences if present anywhere
     if '```' in s:
         parts = s.split('```')
@@ -40,15 +47,22 @@ def clean_json_response(response: str) -> str:
                 candidate = block.lstrip()[4:]  # remove 'json'
                 s = candidate.strip()
                 break
+            # Also try blocks without 'json' prefix
+            elif block.strip().startswith('{'):
+                s = block.strip()
+                break
+    
     # Find first balanced JSON object
     start = s.find('{')
     if start == -1:
         return s
+    
     # Walk and balance braces, taking care of strings
     depth = 0
     in_str = False
     esc = False
     end_index = None
+    
     for idx in range(start, len(s)):
         ch = s[idx]
         if in_str:
@@ -70,8 +84,27 @@ def clean_json_response(response: str) -> str:
                 if depth == 0:
                     end_index = idx
                     break
+    
     if end_index is not None and end_index >= start:
-        return s[start:end_index+1].strip()
+        extracted = s[start:end_index+1].strip()
+        # Validate that extracted JSON is not too large
+        if len(extracted) > max_response_size:
+            # Try to truncate at a safe point
+            extracted = extracted[:max_response_size]
+        return extracted
+    
+    # If no balanced JSON found, try to repair common issues
+    # Check if we have an opening brace but no closing
+    if start != -1 and end_index is None:
+        # Try to find the last complete field and close the JSON
+        last_comma = s.rfind(',', start)
+        last_quote = s.rfind('"', start)
+        
+        if last_comma > start and last_quote > last_comma:
+            # Truncate at last complete field and close
+            truncated = s[start:last_comma] + '}'
+            return truncated
+    
     # Fallback: return trimmed string
     return s
 
@@ -216,7 +249,17 @@ class OrchestratorAgent(BaseAgent):
         try:
             data = json.loads(response)
         except json.JSONDecodeError as e:
-            raise ValueError(f"LLM response is not valid JSON: {response[:500]}") from e
+            # Try to provide more helpful error message
+            error_pos = getattr(e, 'pos', 0)
+            context_start = max(0, error_pos - 100)
+            context_end = min(len(response), error_pos + 100)
+            error_context = response[context_start:context_end]
+            
+            raise ValueError(
+                f"LLM response is not valid JSON. Error at position {error_pos}: {str(e)}\n"
+                f"Context: ...{error_context}...\n"
+                f"Hint: This may happen with very large datasets. Try limiting rows or simplifying the query."
+            ) from e
         # Validate with Pydantic and return as dict
         try:
             briefing = BriefingModel.model_validate(data)
@@ -286,7 +329,13 @@ class TeamLeaderAgent(BaseAgent):
         error_note = None
         for attempt in range(3):
             # Use dynamic prompt with agent profile
-            prompt = get_team_leader_plan_prompt(json.dumps(briefing, indent=2))
+            try:
+                # Build dynamic tools list from registry
+                from tool_registry import get_available_tools
+                tools_list = " | ".join(get_available_tools())
+            except Exception:
+                tools_list = ""
+            prompt = get_team_leader_plan_prompt(json.dumps(briefing, indent=2), tools_list=tools_list)
             if error_note:
                 prompt += f"\n\nATENÇÃO: O plano anterior era inválido pelos seguintes motivos de validação. Corrija e retorne APENAS JSON válido no schema exigido.\nErros: {error_note}\n"
             
@@ -306,7 +355,15 @@ class TeamLeaderAgent(BaseAgent):
             try:
                 data = json.loads(response)
             except json.JSONDecodeError as e:
-                error_note = f"JSON inválido: {str(e)} | Trecho: {response[:400]}"
+                error_pos = getattr(e, 'pos', 0)
+                context_start = max(0, error_pos - 100)
+                context_end = min(len(response), error_pos + 100)
+                error_context = response[context_start:context_end]
+                error_note = (
+                    f"JSON inválido: {str(e)} at position {error_pos}\n"
+                    f"Context: ...{error_context}...\n"
+                    f"Response length: {len(response)} chars"
+                )
                 continue
             # Validate with Pydantic
             try:

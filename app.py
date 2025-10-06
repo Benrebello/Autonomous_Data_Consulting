@@ -13,6 +13,7 @@ from pathlib import Path
 
 # Local imports
 from config import load_config, obtain_llm
+from state import AppState, migrate_session_state_to_app_state
 from agents import (OrchestratorAgent, TeamLeaderAgent, DataArchitectAgent, 
                     DataAnalystTechnicalAgent, DataAnalystBusinessAgent, DataScientistAgent)
 import tools
@@ -20,16 +21,17 @@ import tools
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prompts import QA_REVIEW_PROMPT
 from rate_limiter import RateLimiter, get_rate_limiter
-from ui_components import (RateLimitHandler, display_rate_limit_info, display_token_estimate,
+from ui_components import (RateLimitHandler, display_rate_limit_info,
                            stream_response_to_chat, cleanup_old_plot_files, generate_pdf_report)
-from optimizations import (ParallelExecutor, compress_execution_context, get_metrics_collector,
-                           validate_query_feasibility, suggest_analyses, display_recommendations,
-                           display_execution_explanations)
+from optimizations import (ParallelExecutor, get_metrics_collector, ExecutionEngine)
+from tool_registry import get_available_tools
 
 class AnalysisPipeline:
     def __init__(self, llm, dataframes: Dict[str, pd.DataFrame], rpm_limit=10):
         self.dataframes = dataframes
         self.shared_context = {"dataframes": self.dataframes}
+        # Initialize typed state (keeps backward compatibility by syncing legacy keys)
+        self.state = AppState.get()
         
         # Initialize rate limiter and UI handler
         self.rate_limiter = get_rate_limiter(rpm_limit=rpm_limit)
@@ -38,6 +40,11 @@ class AnalysisPipeline:
         # Initialize optimizations
         self.parallel_executor = ParallelExecutor(max_workers=3)
         self.metrics = get_metrics_collector()
+        self.execution_engine = ExecutionEngine(
+            tool_mapping={},  # Will be set after tool_mapping is built
+            shared_context=self.shared_context,
+            metrics_collector=self.metrics
+        )
         
         # Instancia todos os agentes com rate limiter compartilhado
         self.orchestrator = OrchestratorAgent(llm, rpm_limit, rate_limiter=self.rate_limiter)
@@ -150,7 +157,25 @@ class AnalysisPipeline:
             "validate_and_clean_dataframe": tools.validate_and_clean_dataframe,
             "smart_type_inference": tools.smart_type_inference,
             "detect_data_quality_issues": tools.detect_data_quality_issues,
+            # New ML tools (XGBoost, LightGBM)
+            "xgboost_classifier": tools.xgboost_classifier,
+            "lightgbm_classifier": tools.lightgbm_classifier,
+            "model_comparison": tools.model_comparison,
+            # New Business Analytics
+            "cohort_analysis": tools.cohort_analysis,
+            "customer_lifetime_value": tools.customer_lifetime_value,
         }
+
+        # Update ExecutionEngine with tool_mapping
+        self.execution_engine.tool_mapping = self.tool_mapping
+        
+        # Geração dinâmica da lista de ferramentas disponíveis (para UI/logs)
+        try:
+            self.available_tools = get_available_tools()
+            self.available_tools_str = " | ".join(sorted(self.available_tools))
+        except Exception:
+            self.available_tools = []
+            self.available_tools_str = ""
 
         # Memória para armazenar conclusões anteriores
         if 'memory' not in st.session_state:
@@ -164,6 +189,9 @@ class AnalysisPipeline:
         # Collected reports generated during the process
         if 'reports' not in st.session_state:
             st.session_state['reports'] = []
+        # Analyses history for the current session (lightweight, no external persistence)
+        if 'analyses_history' not in st.session_state:
+            st.session_state['analyses_history'] = []
         # Conversational context defaults
         for key, default in [
             ('clarify_pending', False),
@@ -189,6 +217,29 @@ class AnalysisPipeline:
             st.session_state.setdefault(key, default)
         self.memory = st.session_state.get('memory')
         self.conversation = st.session_state.get('conversation')
+
+        # Sincroniza st.session_state -> AppState para migração suave
+        try:
+            migrate_session_state_to_app_state()
+        except Exception:
+            pass
+
+    def _get(self, key: str, default=None):
+        """Typed state getter with legacy fallback to st.session_state."""
+        try:
+            # Prefer AppState
+            return getattr(self.state, key)
+        except Exception:
+            return st.session_state.get(key, default)
+
+    def _set(self, key: str, value):
+        """Set value into AppState and synchronize to st.session_state."""
+        try:
+            setattr(self.state, key, value)
+            self.state.save()
+        except Exception:
+            pass
+        st.session_state[key] = value
 
     def _truncate_str(self, s: str, max_len: int = 2000) -> str:
         if not isinstance(s, str):
@@ -355,7 +406,7 @@ class AnalysisPipeline:
             ]
 
         # Anti-repetição: compare assinatura
-        sig = self._make_summary_signature(topic or '', st.session_state.get('last_tool') or '', result)
+        sig = self._make_summary_signature(topic or '', self._get('last_tool') or '', result)
         
         # Não mostrar intro para queries muito simples (apenas shape/columns)
         is_simple_query = (
@@ -364,13 +415,13 @@ class AnalysisPipeline:
             all(k in ['shape', 'types', 'columns', 'Rows x Cols', 'Columns'] for k in result.keys())
         )
         
-        if st.session_state.get('last_summary_signature') == sig:
+        if self._get('last_summary_signature') == sig:
             # Mesma assinatura -> retorne apenas bullets atualizados
             intro = "Resumo incremental:" if style != 'Concisa' else None
         else:
             # Só mostrar intro se não for query simples e não for estilo conciso
             intro = None if (style == 'Concisa' or is_simple_query) else f"Resumo sobre {topic or 'o resultado'}:"
-            st.session_state['last_summary_signature'] = sig
+            self._set('last_summary_signature', sig)
 
         # Render por estilo
         if style == 'Concisa':
@@ -409,37 +460,40 @@ class AnalysisPipeline:
             "Quais entregáveis você prefere? (ex.: Resumo textual, Gráficos, Tabela, PDF)",
             "Há restrições de tempo/escopo ou prioridades específicas?"
         ]
-        st.session_state['discovery_active'] = True
-        st.session_state['discovery_step'] = 0
-        st.session_state['discovery_questions'] = questions
-        st.session_state['discovery_answers'] = []
-        st.session_state['discovery_summary'] = None
-        st.session_state['discovery_confirm_pending'] = False
+        self._set('discovery_active', True)
+        self._set('discovery_step', 0)
+        self._set('discovery_questions', questions)
+        self._set('discovery_answers', [])
+        self._set('discovery_summary', None)
+        self._set('discovery_confirm_pending', False)
         # Store the very first user query that kicked off discovery so we don't lose it (e.g., when user confirms with 'ok')
         if initial_query:
-            st.session_state['first_user_query'] = initial_query
+            self._set('first_user_query', initial_query)
 
     def _ingest_discovery_answer(self, user_text: str):
-        st.session_state['discovery_answers'].append(user_text)
-        st.session_state['discovery_step'] += 1
+        answers = list(self._get('discovery_answers', []))
+        answers.append(user_text)
+        self._set('discovery_answers', answers)
+        step = int(self._get('discovery_step', 0)) + 1
+        self._set('discovery_step', step)
 
     def _discovery_is_complete(self) -> bool:
-        return st.session_state['discovery_step'] >= len(st.session_state['discovery_questions'])
+        return int(self._get('discovery_step', 0)) >= len(self._get('discovery_questions', []))
 
     def _summarize_discovery(self) -> str:
-        qs = st.session_state['discovery_questions']
-        ans = st.session_state['discovery_answers']
+        qs = self._get('discovery_questions', [])
+        ans = self._get('discovery_answers', [])
         pairs = [f"- {q} -> {ans[i] if i < len(ans) else ''}" for i, q in enumerate(qs)]
         summary = "Resumo do escopo acordado:\n" + "\n".join(pairs)
-        st.session_state['discovery_summary'] = summary
+        self._set('discovery_summary', summary)
         return summary
 
     def _build_plan_from_discovery(self, user_query: str) -> Dict[str, Any]:
         directives = {
-            'discovery_summary': st.session_state.get('discovery_summary'),
+            'discovery_summary': self._get('discovery_summary'),
         }
         # Prefer the original first question captured at discovery start
-        base_query = st.session_state.get('first_user_query') or user_query
+        base_query = self._get('first_user_query') or user_query
         enriched_query = base_query + "\n\n[Discovery]: " + json.dumps(directives)
         briefing = self.orchestrator.run(enriched_query)
         return briefing
@@ -454,7 +508,7 @@ class AnalysisPipeline:
         Returns True if an update was applied.
         """
         text = (user_text or '').strip().lower()
-        answers = st.session_state.get('discovery_answers', [])
+        answers = list(self._get('discovery_answers', []))
         if not answers:
             return False
         # explicit edit: editar N: ...
@@ -466,7 +520,7 @@ class AnalysisPipeline:
                 idx = int(num_part.strip()) - 1
                 if 0 <= idx < len(answers):
                     answers[idx] = new_val.strip()
-                    st.session_state['discovery_answers'] = answers
+                    self._set('discovery_answers', answers)
                     return True
             except Exception:
                 pass
@@ -481,20 +535,43 @@ class AnalysisPipeline:
             answers[0] = user_text
             updated = True
         if updated:
-            st.session_state['discovery_answers'] = answers
+            self._set('discovery_answers', answers)
         return updated
 
     def _summarize_dataframe(self, df: pd.DataFrame) -> Dict[str, Any]:
         """Return a compact summary of a DataFrame to keep token usage low."""
+        # For very large dataframes, be even more aggressive with compression
+        is_large = len(df) > 10000 or len(df.columns) > 50
+        
+        col_limit = 20 if is_large else 100
+        sample_rows = 3 if is_large else 5
+        sample_cols = 5 if is_large else 10
+        
         summary: Dict[str, Any] = {
             "shape": list(df.shape),
-            "columns": list(df.columns[:100]),  # limit to first 100
-            "dtypes": {c: str(df.dtypes[c]) for c in df.columns[:100]},
+            "columns": list(df.columns[:col_limit]),
+            "dtypes": {c: str(df.dtypes[c]) for c in df.columns[:col_limit]},
         }
-        # Add a tiny sample (up to 5 rows, 10 cols) as CSV text truncated
-        sample = df.iloc[:5, :10]
+        
+        # Add statistical summary for numeric columns
+        numeric_cols = df.select_dtypes(include=['number']).columns[:5]
+        if len(numeric_cols) > 0:
+            summary["numeric_summary"] = {
+                col: {
+                    "min": float(df[col].min()),
+                    "max": float(df[col].max()),
+                    "mean": float(df[col].mean())
+                } for col in numeric_cols
+            }
+        
+        # Add a tiny sample (reduced for large files)
+        sample = df.iloc[:sample_rows, :sample_cols]
         csv_text = sample.to_csv(index=False)
-        summary["sample_csv"] = self._truncate_str(csv_text, 1500)
+        summary["sample_csv"] = self._truncate_str(csv_text, 800 if is_large else 1500)
+        
+        if is_large:
+            summary["_note"] = f"Large dataset: showing limited preview"
+        
         return summary
 
     def _compact_shared_context(self) -> Dict[str, Any]:
@@ -591,14 +668,22 @@ class AnalysisPipeline:
         return self._fill_default_inputs_for_task(tool, inputs)
 
     def _fill_default_inputs_for_task(self, tool, inputs):
-        """Fill default inputs for a task based on the tool."""
-        df_default = self.dataframes[next(iter(self.dataframes.keys()))] if self.dataframes else None
+        """Fill default inputs for a task based on the tool using tool_registry."""
+        from tool_registry import get_tool_defaults
+        
+        df_default = self.dataframes.get(next(iter(self.dataframes.keys()))) if self.dataframes else None
         if df_default is None or df_default.empty:
             return inputs
-
+        
+        # Try to get defaults from registry first
+        registry_defaults = get_tool_defaults(tool, df_default)
+        if registry_defaults:
+            return registry_defaults
+        
+        # Fallback to legacy logic for tools not yet in registry
         numeric_cols = list(df_default.select_dtypes(include=[np.number]).columns)
         cat_cols = list(df_default.select_dtypes(include=['object', 'category']).columns)
-        if not cat_cols and 'class' in df_default.columns:  # for creditcard, class is int but categorical
+        if not cat_cols and 'class' in df_default.columns:
             cat_cols = ['class']
 
         if tool == 'descriptive_stats':
@@ -879,14 +964,14 @@ class AnalysisPipeline:
         # Log the raw user message so it is always persisted, even during discovery loops
         try:
             self.conversation.append({"role": "user", "text": user_query})
-            st.session_state['conversation'] = self.conversation
+            self._set('conversation', self.conversation)
         except Exception:
             pass
         # Status da fase
         phase = (
-            "Descoberta" if st.session_state.get('discovery_active') else
-            ("Análise Direta" if st.session_state.get('intent_mode') == 'simple_analysis' else
-             ("Plano Completo" if st.session_state.get('intent_mode') == 'full_plan' else "Inicial"))
+            "Descoberta" if self._get('discovery_active') else
+            ("Análise Direta" if self._get('intent_mode') == 'simple_analysis' else
+             ("Plano Completo" if self._get('intent_mode') == 'full_plan' else "Inicial"))
         )
         st.caption(f"Fase atual: {phase}")
 
@@ -895,13 +980,13 @@ class AnalysisPipeline:
             st.subheader("Assistente")
             # Response style selector
             style_options = ["Concisa", "Padrão", "Executiva"]
-            current_style = st.session_state.get('response_style', 'Padrão')
+            current_style = self._get('response_style', 'Padrão')
             try:
                 default_index = style_options.index(current_style) if current_style in style_options else 1
             except Exception:
                 default_index = 1
             chosen = st.selectbox("Estilo de resposta", style_options, index=default_index)
-            st.session_state['response_style'] = chosen
+            self._set('response_style', chosen)
             st.markdown(f"**Fase:** {phase}")
             # Reset context action
             if st.button("Resetar contexto"):
@@ -981,18 +1066,19 @@ class AnalysisPipeline:
                     "deliverables": ["Resultado direto da ferramenta"]
                 }
                 # Persist intent/tool for subsequent turns
-                st.session_state['intent_mode'] = 'simple_analysis'
-                st.session_state['last_tool'] = tool_name
+                self._set('intent_mode', 'simple_analysis')
+                self._set('last_tool', tool_name)
             else:
                 # ===== Conversational Discovery first =====
-                if st.session_state.get('discovery_active'):
+                if self._get('discovery_active'):
                     # In discovery flow
-                    if not st.session_state.get('discovery_confirm_pending'):
+                    if not self._get('discovery_confirm_pending'):
                         # Record answer to current step then ask next or summarize
-                        self._ingest_discovery_answer(user_query)
+                        answers = self._ingest_discovery_answer(user_query)
                         if not self._discovery_is_complete():
-                            q_idx = st.session_state['discovery_step']
-                            next_q = st.session_state['discovery_questions'][q_idx]
+                            q_idx = int(self._get('discovery_step', 0))
+                            next_qs = self._get('discovery_questions', [])
+                            next_q = next_qs[q_idx] if q_idx < len(next_qs) else ""
                             st.write("2. **Descoberta:**")
                             st.markdown(f"{q_idx+1}. {next_q}")
                             return
@@ -1002,7 +1088,7 @@ class AnalysisPipeline:
                             summary = self._summarize_discovery()
                             st.markdown(summary)
                             st.info("Se estiver correto, responda com 'confirmo', 'ok' ou 'aprovo'. Para ajustar, descreva as mudanças.")
-                            st.session_state['discovery_confirm_pending'] = True
+                            self._set('discovery_confirm_pending', True)
                             return
                     else:
                         # Waiting for confirmation
@@ -1010,46 +1096,48 @@ class AnalysisPipeline:
                             # Build plan from discovery
                             briefing = self._build_plan_from_discovery(user_query)
                             # End discovery phase
-                            st.session_state['discovery_active'] = False
-                            st.session_state['discovery_confirm_pending'] = False
-                            st.session_state['intent_mode'] = 'full_plan'
+                            self._set('discovery_active', False)
+                            self._set('discovery_confirm_pending', False)
+                            self._set('intent_mode', 'full_plan')
                         else:
                             # Treat message as adjustments: restart discovery with first question
                             st.warning("Ajustes recebidos. Vamos refinar a descoberta.")
                             self._start_discovery()
-                            st.markdown(f"1. {st.session_state['discovery_questions'][0]}")
+                            dq = self._get('discovery_questions', [])
+                            st.markdown(f"1. {dq[0] if dq else ''}")
                             return
-                elif not st.session_state.get('intent_mode'):
+                elif not self._get('intent_mode'):
                     # Start discovery if nothing is mapped and no prior intent
                     self._start_discovery(initial_query=user_query)
                     st.write("2. **Descoberta:**")
-                    st.markdown(f"1. {st.session_state['discovery_questions'][0]}")
+                    dq = self._get('discovery_questions', [])
+                    st.markdown(f"1. {dq[0] if dq else ''}")
                     return
 
                 # If we have a recent result, assume follow-up and default to previous intent/tool
-                if st.session_state.get('last_result') and not st.session_state.get('intent_mode'):
-                    prev_tool = st.session_state.get('last_tool') or "descriptive_stats"
+                if self._get('last_result') and not self._get('intent_mode'):
+                    prev_tool = self._get('last_tool') or "descriptive_stats"
                     briefing = {
                         "main_intent": "simple_analysis",
                         "tool": prev_tool,
                         "user_query": user_query,
                         "main_goal": f"Executar {prev_tool} (follow-up)",
-                        "deliverables": st.session_state.get('last_deliverables') or ["Resumo textual", "Gráficos"],
+                        "deliverables": self._get('last_deliverables') or ["Resultado direto da ferramenta"]
                     }
                 else:
                     # Conversational clarification: ask once, parse next user message
                     # Allow user to reset context explicitly
                     if any(k in query_lower for k in ["reset", "recomeçar", "recomecar", "limpar", "novo fluxo"]):
                         for k in [
-                            'clarify_pending', 'intent_mode', 'last_tool',
-                            'last_deliverables', 'last_objective'
+                            'clarify_pending','intent_mode','last_tool',
+                            'last_deliverables','last_objective'
                         ]:
-                            st.session_state.pop(k, None)
+                            self._set(k, None)
                         st.info("Contexto de conversa limpo. Pode enviar sua nova solicitação.")
                         return
 
                     # If we already have a chosen intent, reuse it silently
-                    prev_intent = st.session_state.get('intent_mode')
+                    prev_intent = self._get('intent_mode')
                     if prev_intent:
                         if prev_intent == 'simple_suggestions':
                             briefing = {
@@ -1062,23 +1150,23 @@ class AnalysisPipeline:
                                 if keyword in query_lower:
                                     inferred_tool = tool
                                     break
-                            tool_to_use = inferred_tool or st.session_state.get('last_tool') or "descriptive_stats"
+                            tool_to_use = inferred_tool or self._get('last_tool') or "descriptive_stats"
                             briefing = {
                                 "main_intent": "simple_analysis",
                                 "tool": tool_to_use,
                                 "user_query": user_query,
                                 "main_goal": f"Executar {tool_to_use}",
-                                "deliverables": st.session_state.get('last_deliverables') or ["Resumo textual", "Gráficos"],
+                                "deliverables": self._get('last_deliverables') or ["Resumo textual", "Gráficos"],
                             }
                         else:  # full_plan
                             directives = {
-                                "objective_hint": st.session_state.get('last_objective'),
-                                "deliverables": st.session_state.get('last_deliverables'),
+                                "objective_hint": self._get('last_objective'),
+                                "deliverables": self._get('last_deliverables'),
                             }
                             enriched_query = user_query + "\n\n[UserDirectives]: " + json.dumps(directives)
                             briefing = self.orchestrator.run(enriched_query)
-                    elif not st.session_state.get('clarify_pending', False):
-                        st.session_state['clarify_pending'] = True
+                    elif not self._get('clarify_pending', False):
+                        self._set('clarify_pending', True)
                         st.write("2. **Alinhamento de Intenção (conversação):**")
                         st.markdown(
                             "Por favor, me diga em uma frase: você quer sugestões rápidas, uma análise direta (qual?), ou um plano completo? "
@@ -1089,15 +1177,15 @@ class AnalysisPipeline:
                     else:
                         # Use the current user_query as the user's clarification
                         parsed = self._infer_intent_from_text(user_query, simple_mappings)
-                        st.session_state['clarify_pending'] = False
+                        self._set('clarify_pending', False)
                         if parsed['intent'] == 'simple_suggestions':
                             briefing = {
                                 "main_intent": "simple_suggestions",
                                 "user_query": user_query,
                             }
-                            st.session_state['intent_mode'] = 'simple_suggestions'
-                            st.session_state['last_objective'] = parsed.get('objective')
-                            st.session_state['last_deliverables'] = parsed.get('deliverables')
+                            self._set('intent_mode', 'simple_suggestions')
+                            self._set('last_objective', parsed.get('objective'))
+                            self._set('last_deliverables', parsed.get('deliverables'))
                         elif parsed['intent'] == 'simple_analysis':
                             tool = parsed['tool'] or "descriptive_stats"
                             briefing = {
@@ -1107,21 +1195,21 @@ class AnalysisPipeline:
                                 "main_goal": parsed['objective'] or f"Executar {tool}",
                                 "deliverables": parsed['deliverables'] or ["Resumo textual", "Gráficos"],
                             }
-                            st.session_state['intent_mode'] = 'simple_analysis'
-                            st.session_state['last_tool'] = tool
-                            st.session_state['last_objective'] = parsed.get('objective')
-                            st.session_state['last_deliverables'] = parsed.get('deliverables') or ["Resumo textual", "Gráficos"]
+                            self._set('intent_mode', 'simple_analysis')
+                            self._set('last_tool', tool)
+                            self._set('last_objective', parsed.get('objective'))
+                            self._set('last_deliverables', parsed.get('deliverables') or ["Resumo textual", "Gráficos"])
                         else:
                             # full plan with enriched directives
                             directives = {
-                                "objective_hint": parsed['objective'],
-                                "deliverables": parsed['deliverables'],
+                                "objective": parsed.get('objective'),
+                                "deliverables": parsed.get('deliverables') or ["Resumo textual"],
                             }
                             enriched_query = user_query + "\n\n[UserDirectives]: " + json.dumps(directives)
                             briefing = self.orchestrator.run(enriched_query)
-                            st.session_state['intent_mode'] = 'full_plan'
-                            st.session_state['last_objective'] = parsed.get('objective')
-                            st.session_state['last_deliverables'] = parsed.get('deliverables')
+                            self._set('intent_mode', 'full_plan')
+                            self._set('last_objective', parsed.get('objective'))
+                            self._set('last_deliverables', parsed.get('deliverables'))
 
         st.json(briefing)
 
@@ -1142,16 +1230,16 @@ class AnalysisPipeline:
                 resolved_inputs = self._resolve_inputs(inputs)
                 result = self.tool_mapping[tool_name](**resolved_inputs)
                 # Persist last result context for follow-up turns
-                st.session_state['last_result'] = {
+                self._set('last_result', {
                     'tool': tool_name,
-                    'inputs': inputs,
-                    'timestamp': pd.Timestamp.utcnow().isoformat(),
-                }
-                st.session_state['intent_mode'] = 'simple_analysis'
-                st.session_state['last_tool'] = tool_name
+                    'inputs': resolved_inputs,
+                    'result': result if isinstance(result, (dict, list, str, int, float)) else str(type(result))
+                })
+                self._set('intent_mode', 'simple_analysis')
+                self._set('last_tool', tool_name)
                 
                 # Para análises simples, mostrar apenas resultado formatado (sem LLM)
-                composed = self._compose_response(topic=user_query, result=result, style=st.session_state.get('response_style', 'Padrão'))
+                composed = self._compose_response(topic=user_query, result=result, style=self._get('response_style', 'Padrão'))
                 with st.chat_message("assistant"):
                     st.markdown(composed)
                     full_response = composed  # Usar apenas o composed, sem gerar resposta do LLM
@@ -1200,6 +1288,23 @@ class AnalysisPipeline:
                     'bytes': pdf,
                     'caption': f"Análise gerada para {tool_name}"
                 })
+
+                # Register in session analyses history (no persistence outside session)
+                try:
+                    hist = st.session_state.get('analyses_history', [])
+                    hist.append({
+                        'timestamp': pd.Timestamp.utcnow().isoformat(),
+                        'mode': 'simple_analysis',
+                        'user_query': user_query,
+                        'tool': tool_name,
+                        'inputs': resolved_inputs,
+                        'summary': full_response,
+                        'pdf': pdf,
+                        'chart': (last_chart['bytes'] if 'last_chart' in locals() and isinstance(last_chart, dict) and 'bytes' in last_chart else None),
+                    })
+                    st.session_state['analyses_history'] = hist
+                except Exception:
+                    pass
             else:
                 st.error(f"Ferramenta '{tool_name}' não encontrada.")
             return  # Sair sem executar o fluxo completo
@@ -1498,184 +1603,41 @@ class AnalysisPipeline:
 
         # Etapa 3: Execução do plano (com paralelização segura)
         st.write("3. **Esquadrão de Dados:** Executando as tarefas...")
-        # Reinicia a lista de gráficos desta execução para evitar paths antigos
         st.session_state.charts = []
-        # Reset structured execution log
         st.session_state['execution_log'] = []
-        tasks = plan['execution_plan']
-        completed_task_ids = set()
-
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import time
-
-        def run_task(task):
-            """Worker sem chamadas de UI: executa a ferramenta e retorna (task_id, result, error, duration_s, traceback_str)."""
-            start = time.perf_counter()
-            try:
-                agent = self.agents[task['agent_responsible']]
-                tool = self.tool_mapping[task['tool_to_use']]
-                kwargs = self._resolve_inputs(task['inputs'])
-                result = agent.execute_task(tool, kwargs)
-                duration = time.perf_counter() - start
-                return task['task_id'], result, None, duration, None
-            except Exception as e:
-                duration = time.perf_counter() - start
-                tb = traceback.format_exc()
-                return task['task_id'], None, e, duration, tb
-
-        while len(completed_task_ids) < len(tasks):
-            # Seleciona tarefas prontas (dependências satisfeitas) e ainda não executadas
-            ready_tasks = [t for t in tasks if t['task_id'] not in completed_task_ids and all(d in completed_task_ids for d in t.get('dependencies', []))]
-            if not ready_tasks:
-                st.error("Erro: Dependências circulares ou tarefas não executáveis detectadas.")
-                break
-
-            # Configuração dinâmica de paralelismo e autosplit por RPM
-            user_parallel = int(st.session_state.get('max_parallel_tasks', 4))
-            max_parallel = user_parallel
-            # Adaptação dinâmica sob quota: reduzir paralelismo quando houver erro de quota recente
-            api_status = st.session_state.get('api_status', {})
-            if api_status.get('reason') == 'quota':
-                max_parallel = max(1, max_parallel // 2)
-            elif api_status.get('ok'):
-                # Reexpandir quando janela for liberada
-                max_parallel = user_parallel
-            rpm_cfg = int(st.session_state.get('rpm_limit', 10))
-            auto_split = bool(st.session_state.get('auto_split', True))
-
-            # Badge de alta demanda
-            if auto_split and len(ready_tasks) > rpm_cfg:
-                st.sidebar.info(f"Alta demanda: {len(ready_tasks)} tarefas prontas > RPM {rpm_cfg}. Dividindo em lotes.")
-
-            # Número de tarefas a processar neste lote
-            if auto_split:
-                chunk_size = max(1, min(len(ready_tasks), max_parallel, rpm_cfg))
-            else:
-                chunk_size = max(1, min(len(ready_tasks), max_parallel))
-
-            batch_tasks = ready_tasks[:chunk_size]
-
-            # Executa em paralelo as tarefas do lote
-            max_workers = min(max_parallel, len(batch_tasks))
-            futures = {}
-            # Retry counter per task_id to avoid infinite loops
-            retry_counts: dict[int, int] = st.session_state.get('retry_counts', {})
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                for t in batch_tasks:
-                    st.info(f"Executando Tarefa {t['task_id']}: {t['description']}")
-                    futures[executor.submit(run_task, t)] = t
-                for fut in as_completed(futures):
-                    t = futures[fut]
-                    task_id = t['task_id']
-                    result = None
-                    error = None
-                    tb_str = None
-                    try:
-                        task_id_ret, result, error, duration, tb_str = fut.result()
-                    except Exception as e:
-                        error = e
-                        duration = None
-                        tb_str = traceback.format_exc()
-
-                    if error is None:
-                        # Atualiza contexto e UI no thread principal
-                        self.shared_context[t['output_variable']] = result
-                        if duration is not None:
-                            st.success(f"Tarefa {task_id} concluída. Tempo: {duration:.2f}s")
-                        else:
-                            st.success(f"Tarefa {task_id} concluída.")
-                        completed_task_ids.add(task_id)
-                        # Log success
-                        st.session_state['execution_log'].append({
-                            'task_id': task_id,
-                            'description': t.get('description'),
-                            'tool': t.get('tool_to_use'),
-                            'inputs_keys': list((t.get('inputs') or {}).keys()),
-                            'status': 'success',
-                            'duration_s': duration
-                        })
-                        # Cascading re-execution: if this success happened after a retry, invalidate completed dependents
-                        rc = st.session_state.get('retry_counts', {})
-                        if rc.get(task_id, 0) > 0:
-                            dependents = [tt for tt in tasks if task_id in (tt.get('dependencies') or [])]
-                            requeued = []
-                            for dep in dependents:
-                                dep_id = dep.get('task_id')
-                                if dep_id in completed_task_ids:
-                                    completed_task_ids.remove(dep_id)
-                                    requeued.append(dep_id)
-                            if requeued:
-                                st.warning(f"Dependentes re-enfileiradas por cascata: {requeued}")
-                                st.session_state['execution_log'].append({
-                                    'task_id': task_id,
-                                    'status': 'cascade_invalidation',
-                                    'dependents': requeued
-                                })
-                    else:
-                        # Try auto-correction with TeamLeader and selective re-execution once
-                        error_briefing = briefing.copy()
-                        error_briefing['error'] = (
-                            f"Falha na Tarefa {task_id}: {str(error)}\n"
-                            f"Traceback:\n{tb_str or ''}\n"
-                            f"Task: {json.dumps(t, default=str)}"
-                        )
-                        will_retry = False
-                        try:
-                            corrected_plan = self.team_leader.create_plan(error_briefing)
-                            # Try find matching task by id; fallback by description
-                            corrected_task = None
-                            for ct in corrected_plan.get('execution_plan', []):
-                                if ct.get('task_id') == task_id:
-                                    corrected_task = ct
-                                    break
-                            if corrected_task is None:
-                                for ct in corrected_plan.get('execution_plan', []):
-                                    if ct.get('description') == t.get('description'):
-                                        corrected_task = ct
-                                        break
-                            if corrected_task and retry_counts.get(task_id, 0) < 1:
-                                # Update current task with corrected fields
-                                t['tool_to_use'] = corrected_task.get('tool_to_use', t.get('tool_to_use'))
-                                new_inputs = corrected_task.get('inputs', t.get('inputs', {})) or {}
-                                t['inputs'] = self._fill_default_inputs_for_task(t['tool_to_use'], new_inputs)
-                                retry_counts[task_id] = retry_counts.get(task_id, 0) + 1
-                                st.warning(f"Reexecutando Tarefa {task_id} com correções sugeridas pelo TeamLeader.")
-                                will_retry = True
-                        except Exception:
-                            will_retry = False
-
-                        # Log outcome
-                        st.session_state['execution_log'].append({
-                            'task_id': task_id,
-                            'description': t.get('description'),
-                            'tool': t.get('tool_to_use'),
-                            'inputs_keys': list((t.get('inputs') or {}).keys()),
-                            'status': 'retrying' if will_retry else 'error',
-                            'error': str(error),
-                            'traceback': tb_str,
-                            'duration_s': duration
-                        })
-
-                        if will_retry:
-                            # Do not mark as completed; let the while loop pick it again
-                            st.session_state['retry_counts'] = retry_counts
-                        else:
-                            # Give up and mark completed to avoid deadlock
-                            completed_task_ids.add(task_id)
-
-            # Determinar se o lote envolve chamadas de LLM (por ora, ferramentas são locais; mantenha lista vazia)
-            def _is_llm_tool(name: str) -> bool:
-                llm_tools = set()  # Placeholder para futuras ferramentas LLM-based
-                return name in llm_tools
-
-            llm_in_batch = any(_is_llm_tool(t['tool_to_use']) for t in batch_tasks)
-
-            # Se autosplit e houver LLM no lote, respeitar janela de RPM entre lotes (best-effort)
-            if auto_split and llm_in_batch and chunk_size >= rpm_cfg and rpm_cfg > 0:
-                import time as _t
-                wait_s = max(1, int(60 / rpm_cfg))
-                st.info(f"Aguardando {wait_s}s para respeitar o limite de {rpm_cfg} req/min antes do próximo lote (LLM)...")
-                _t.sleep(wait_s)
+        
+        # Execute plan using ExecutionEngine
+        execution_result = self.execution_engine.execute_plan(
+            plan=plan,
+            resolve_inputs_fn=self._resolve_inputs,
+            fill_defaults_fn=self._fill_default_inputs_for_task,
+            max_retries=1
+        )
+        
+        # Process execution results
+        completed_tasks = execution_result.get('completed', [])
+        failed_tasks = execution_result.get('failed', [])
+        task_results = execution_result.get('results', {})
+        execution_log = execution_result.get('execution_log', [])
+        
+        # Display results in UI
+        for task_id in completed_tasks:
+            result_info = task_results.get(task_id, {})
+            if result_info.get('status') == 'success':
+                duration = result_info.get('execution_time', 0)
+                st.success(f"Tarefa {task_id} concluída. Tempo: {duration:.2f}s")
+        
+        for task_id in failed_tasks:
+            result_info = task_results.get(task_id, {})
+            error = result_info.get('error', 'Unknown error')
+            st.error(f"Tarefa {task_id} falhou: {error}")
+        
+        # Store execution log
+        st.session_state['execution_log'] = execution_log
+        
+        # Display summary
+        total_tasks = len(plan.get('execution_plan', []))
+        st.info(f"Execução concluída: {len(completed_tasks)}/{total_tasks} tarefas bem-sucedidas")
 
         # Etapa 4: Síntese, Revisão Crítica (QA) e Resposta Final
         st.write("4. **Líder de Equipe:** Sintetizando resultados...")
@@ -1896,14 +1858,27 @@ def main():
 
     if uploaded_files:
         dataframes = {}
-        normalize_cols = st.sidebar.checkbox("Normalize column names (snake_case)", value=True)
+        normalize_cols = st.sidebar.checkbox("Normalize column names", value=True, help="Convert column names to lowercase and replace spaces with underscores")
         auto_validate = st.sidebar.checkbox("Auto-validate and clean data", value=True, 
                                            help="Automatically detect and fix common data issues like '97 min' -> 97.0")
+        
+        # Configuration for large files
+        max_rows = st.sidebar.number_input("Max rows to load (0 = all)", min_value=0, max_value=1000000, value=0, step=10000,
+                                          help="Limit rows for large files to avoid memory/performance issues")
         
         for file in uploaded_files:
             fname = file.name.lower()
             if fname.endswith('.csv'):
-                df = pd.read_csv(file)
+                # Load with row limit if specified
+                if max_rows > 0:
+                    df = pd.read_csv(file, nrows=max_rows)
+                    st.info(f"📊 Loaded first {max_rows:,} rows from {file.name}")
+                else:
+                    df = pd.read_csv(file)
+                
+                # Warn if file is very large
+                if len(df) > 100000:
+                    st.warning(f"⚠️ Large dataset detected: {len(df):,} rows. Consider using row limit for better performance.")
                 if normalize_cols:
                     df = tools.normalize_dataframe_columns(df)
                 corrected_df, report = tools.validate_and_correct_data_types(df)
@@ -1930,7 +1905,16 @@ def main():
                     st.info(f"Correções de tipos de dados para {file.name}: {corrections}")
                 dataframes[file.name] = df
             elif fname.endswith('.xlsx'):
-                df = pd.read_excel(file, engine='openpyxl')
+                # Load with row limit if specified
+                if max_rows > 0:
+                    df = pd.read_excel(file, engine='openpyxl', nrows=max_rows)
+                    st.info(f"📊 Loaded first {max_rows:,} rows from {file.name}")
+                else:
+                    df = pd.read_excel(file, engine='openpyxl')
+                
+                # Warn if file is very large
+                if len(df) > 100000:
+                    st.warning(f"⚠️ Large dataset detected: {len(df):,} rows. Consider using row limit for better performance.")
                 if normalize_cols:
                     df = tools.normalize_dataframe_columns(df)
                 corrected_df, report = tools.validate_and_correct_data_types(df)
@@ -2040,6 +2024,67 @@ def main():
                 removed = cleanup_old_plot_files()
                 st.success(f"Files removed: {removed}")
 
+        # Session analyses history UI (no external persistence)
+        with st.sidebar.expander("Histórico da sessão", expanded=False):
+            history = st.session_state.get('analyses_history', [])
+            if not history:
+                st.info("Nenhuma análise registrada nesta sessão.")
+            else:
+                # Filters
+                tools_in_history = sorted({it.get('tool','') for it in history if it.get('tool')})
+                selected_tool = st.selectbox("Filtrar por ferramenta", ["(todas)"] + tools_in_history, index=0)
+                search_term = st.text_input("Buscar por termo na pergunta", value="")
+
+                # Apply filters
+                def _match(item):
+                    if selected_tool != "(todas)" and item.get('tool') != selected_tool:
+                        return False
+                    if search_term and search_term.lower() not in (item.get('user_query','').lower()):
+                        return False
+                    return True
+
+                filtered = [it for it in history if _match(it)]
+
+                # Clear history (optional)
+                if st.button("Limpar histórico"):
+                    st.session_state['analyses_history'] = []
+                    st.success("Histórico limpo.")
+                    st.experimental_rerun()
+
+                # Show latest first
+                for idx, item in enumerate(reversed(filtered), start=1):
+                    title = f"{item.get('timestamp','')} · {item.get('tool','')}"
+                    with st.expander(title, expanded=False):
+                        st.markdown(f"**Pergunta:** {item.get('user_query','')}")
+                        st.markdown("**Resumo:**")
+                        st.markdown(item.get('summary',''))
+                        # Downloads
+                        if item.get('pdf'):
+                            st.download_button(
+                                label="Baixar PDF",
+                                data=item['pdf'],
+                                file_name=f"historico_{idx}.pdf",
+                                mime="application/pdf",
+                                key=f"hist_pdf_{idx}"
+                            )
+                        if item.get('chart'):
+                            st.image(item['chart'], caption="Último gráfico")
+                            st.download_button(
+                                label="Baixar gráfico",
+                                data=item['chart'],
+                                file_name=f"historico_{idx}.png",
+                                mime="image/png",
+                                key=f"hist_chart_{idx}"
+                            )
+                        # Rerun with saved inputs
+                        if st.button("Reexecutar esta análise", key=f"replay_{idx}"):
+                            st.session_state['replay_request'] = {
+                                'tool': item.get('tool'),
+                                'inputs': item.get('inputs') or {},
+                                'user_query': item.get('user_query') or f"Replay: {item.get('tool')}"
+                            }
+                            st.experimental_rerun()
+
         # Preview of default DataFrame: header, 4 rows, types and potential keys
         with st.expander("Preview of Default DataFrame (header, 4 rows, types and potential keys)"):
             df_preview = st.session_state.dataframes[default_df_key]
@@ -2144,6 +2189,17 @@ def main():
                                     key=f"download_chart_legacy_{idx}_{len(history)}"
                                 )
         
+        # Check if there is a replay request (execute without waiting for new chat input)
+        if st.session_state.get('replay_request'):
+            req = st.session_state.pop('replay_request')
+            try:
+                llm = st.session_state.get('llm')
+                pipeline = AnalysisPipeline(llm, st.session_state.dataframes, st.session_state.get('rpm_limit', 10))
+                pipeline.execute_replay(req.get('tool'), req.get('inputs') or {}, req.get('user_query') or '')
+                st.stop()
+            except Exception as e:
+                st.error(f"Falha ao reexecutar análise: {e}")
+
         # Fixed input at bottom (Gemini/GPT style)
         st.markdown("---")
         user_prompt = st.chat_input("Digite sua pergunta sobre os dados...")

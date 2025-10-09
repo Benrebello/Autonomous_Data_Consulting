@@ -1,30 +1,30 @@
 # Tools Reference Guide
 
-Complete reference for all 122 analysis tools available in the system.
+Complete reference for all 125 exported analysis tools available in the system (211 total functions including internal utilities).
 
 ## Table of Contents
 
-- [Data Profiling (15)](#data-profiling)
-- [Statistical Tests (11)](#statistical-tests)
-- [Machine Learning (15)](#machine-learning)
-- [Advanced Analytics (7)](#advanced-analytics)
-- [Financial Analytics (5)](#financial-analytics)
-- [Math Operations (7)](#math-operations)
-- [Advanced Math (3)](#advanced-math)
-- [Geometry (3)](#geometry)
-- [Feature Engineering (5)](#feature-engineering)
-- [Business Analytics (4)](#business-analytics)
-- [Time Series (4)](#time-series)
-- [Text Analysis (3)](#text-analysis)
-- [Visualization (7)](#visualization)
-- [Clustering (3)](#clustering)
-- [Correlation Analysis (4)](#correlation-analysis)
-- [Outlier Detection (3)](#outlier-detection)
-- [Data Transformation (8)](#data-transformation)
-- [Data Cleaning (6)](#data-cleaning)
-- [File Operations (3)](#file-operations)
-- [Geospatial (1)](#geospatial)
-- [Helpers (7)](#helpers)
+- [Data Profiling (17)](#data-profiling)
+- [Statistical Tests (14)](#statistical-tests)
+- [Machine Learning (42)](#machine-learning)
+- [Advanced Analytics (12)](#advanced-analytics)
+- [Financial Analytics (6)](#financial-analytics)
+- [Math Operations (8)](#math-operations)
+- [Advanced Math (7)](#advanced-math)
+- [Geometry (5)](#geometry)
+- [Feature Engineering (6)](#feature-engineering)
+- [Business Analytics (9)](#business-analytics)
+- [Time Series (8)](#time-series)
+- [Text Analysis (7)](#text-analysis)
+- [Visualization (11)](#visualization)
+- [Clustering (6)](#clustering)
+- [Correlation Analysis (6)](#correlation-analysis)
+- [Outlier Detection (5)](#outlier-detection)
+- [Data Transformation (13)](#data-transformation)
+- [Data Cleaning (7)](#data-cleaning)
+- [File Operations (10)](#file-operations)
+- [Geospatial (3)](#geospatial)
+- [Helpers (9)](#helpers)
 
 ---
 
@@ -296,14 +296,14 @@ Complete reference for all 122 analysis tools available in the system.
 
 **Module**: `tools/data_cleaning.py`
 
-| Function | Description | Key Parameters |
-|----------|-------------|----------------|
-| `clean_data` | Fill missing values | `df`, `column`, `strategy` |
-| `fill_missing_with_median` | Fill with median | `df`, `columns` |
-| `validate_and_correct_data_types` | Auto-correct types | `df` |
-| `validate_and_clean_dataframe` | Comprehensive cleaning | `df`, `aggressive` |
-| `smart_type_inference` | Intelligent type inference | `df` |
-| `detect_data_quality_issues` | Quality issue detection | `df` |
+| Function | Description | Key Parameters | Returns |
+|----------|-------------|----------------|---------|
+| `clean_data` | Fill missing values | `df`, `column`, `strategy` | DataFrame |
+| `fill_missing_with_median` | Fill with median | `df`, `columns` | DataFrame |
+| `validate_and_correct_data_types` | Auto-correct types | `df` | Tuple (DataFrame, report dict) |
+| `validate_and_clean_dataframe` | Comprehensive cleaning | `df`, `remove_duplicates_flag`, `fill_numeric_nulls` | Dict with 'dataframe' and 'report' |
+| `smart_type_inference` | Intelligent type inference | `df` | DataFrame |
+| `detect_data_quality_issues` | Quality issue detection | `df` | Dict with quality metrics |
 
 ---
 
@@ -347,7 +347,7 @@ Complete reference for all 122 analysis tools available in the system.
 
 ## Tool Registry
 
-All 81 public tools are registered in `tool_registry.py` with:
+All 86 public tools are registered in `tool_registry.py` with:
 - **Automatic defaults**: Parameter generation from DataFrame
 - **Validation rules**: Minimum rows, required column types
 - **Category tags**: For organized discovery

@@ -83,10 +83,14 @@ def validate_and_correct_data_types(df: pd.DataFrame):
         # Attempt numeric conversion first
         converted = df_copy[col]
         try:
-            converted_num = pd.to_numeric(converted, errors='ignore')
+            converted_num = pd.to_numeric(converted, errors='coerce')
+            # Only apply conversion if at least some values were successfully converted
+            if converted_num.notna().any():
+                df_copy[col] = converted_num
+            else:
+                df_copy[col] = converted
         except Exception:
-            converted_num = converted
-        df_copy[col] = converted_num
+            df_copy[col] = converted
         became_numeric = (not original_is_numeric) and pd.api.types.is_numeric_dtype(df_copy[col])
 
         # Attempt datetime conversion if name suggests time/date
@@ -94,9 +98,12 @@ def validate_and_correct_data_types(df: pd.DataFrame):
         if any(keyword in col.lower() for keyword in ['date', 'time', 'timestamp']):
             try:
                 before_dt = pd.api.types.is_datetime64_any_dtype(df_copy[col])
-                df_copy[col] = pd.to_datetime(df_copy[col], errors='ignore')
-                after_dt = pd.api.types.is_datetime64_any_dtype(df_copy[col])
-                became_datetime = (not original_is_datetime) and after_dt and not before_dt
+                converted_dt = pd.to_datetime(df_copy[col], errors='coerce')
+                # Only apply conversion if at least some values were successfully converted
+                if converted_dt.notna().any():
+                    df_copy[col] = converted_dt
+                    after_dt = pd.api.types.is_datetime64_any_dtype(df_copy[col])
+                    became_datetime = (not original_is_datetime) and after_dt and not before_dt
             except Exception:
                 pass
 
@@ -112,7 +119,7 @@ def validate_and_correct_data_types(df: pd.DataFrame):
 
 def validate_and_clean_dataframe(df: pd.DataFrame, 
                                   remove_duplicates_flag: bool = True,
-                                  fill_numeric_nulls: bool = True) -> pd.DataFrame:
+                                  fill_numeric_nulls: bool = True) -> dict:
     """Comprehensive data validation and cleaning.
     
     Args:
@@ -121,22 +128,53 @@ def validate_and_clean_dataframe(df: pd.DataFrame,
         fill_numeric_nulls: Whether to fill numeric null values with median
         
     Returns:
-        Cleaned DataFrame
+        Dictionary with 'dataframe' (cleaned DataFrame) and 'report' (dict with validation details)
     """
     df_clean = df.copy()
+    corrections_applied = []
+    warnings = []
+    
+    # Track initial state
+    initial_rows = len(df_clean)
+    initial_nulls = df_clean.isnull().sum().sum()
     
     # Remove duplicates
     if remove_duplicates_flag:
-        df_clean = df_clean.drop_duplicates()
+        duplicates_count = df_clean.duplicated().sum()
+        if duplicates_count > 0:
+            df_clean = df_clean.drop_duplicates()
+            corrections_applied.append(f"Removed {duplicates_count} duplicate rows")
     
     # Fill numeric nulls
     if fill_numeric_nulls:
         numeric_cols = df_clean.select_dtypes(include=[np.number]).columns
         for col in numeric_cols:
-            if df_clean[col].isnull().any():
-                df_clean[col] = df_clean[col].fillna(df_clean[col].median())
+            null_count = df_clean[col].isnull().sum()
+            if null_count > 0:
+                median_val = df_clean[col].median()
+                df_clean[col] = df_clean[col].fillna(median_val)
+                corrections_applied.append(f"Filled {null_count} null values in '{col}' with median ({median_val:.2f})")
     
-    return df_clean
+    # Check for remaining nulls in non-numeric columns
+    remaining_nulls = df_clean.isnull().sum()
+    for col, null_count in remaining_nulls.items():
+        if null_count > 0:
+            warnings.append(f"Column '{col}' still has {null_count} null values")
+    
+    # Build report
+    report = {
+        'corrections_applied': corrections_applied,
+        'warnings': warnings,
+        'initial_rows': initial_rows,
+        'final_rows': len(df_clean),
+        'initial_nulls': initial_nulls,
+        'final_nulls': df_clean.isnull().sum().sum()
+    }
+    
+    return {
+        'dataframe': df_clean,
+        'report': report
+    }
 
 
 def smart_type_inference(df: pd.DataFrame) -> pd.DataFrame:

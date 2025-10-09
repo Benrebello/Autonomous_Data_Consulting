@@ -7,10 +7,10 @@ This document describes the complete architecture of the Autonomous Data Consult
 The system follows a modular, multi-agent architecture with clear separation of concerns and comprehensive optimization features:
 
 - **Presentation Layer**: Streamlit UI (`app.py`)
-- **Agent Layer**: 6 specialized AI agents (`agents.py`)
-- **Tool Layer**: 21 specialized modules with 122 functions (`tools/`)
-- **Infrastructure Layer**: State management, rate limiting, execution engine, metrics
-- **Configuration Layer**: LLM setup, tool registry (81 registered tools), prompts
+- **Agent Layer**: 10 specialized AI agents with adaptive intelligence (`agents.py`)
+- **Tool Layer**: 21 specialized modules with 211 functions (125 exported) (`tools/`)
+- **Infrastructure Layer**: State management, rate limiting, execution engine, metrics, smart caching
+- **Configuration Layer**: LLM setup, tool registry (86 registered tools), dynamic prompts
 
 ## High-Level Overview
 
@@ -37,21 +37,29 @@ The system follows a modular, multi-agent architecture with clear separation of 
 
 ### 2. Agent Layer
 - **File**: `agents.py`
-- **Components**: 6 specialized AI agents
-  - `OrchestratorAgent`: Converts natural language queries into structured briefings (JSON)
-  - `TeamLeaderAgent`: Creates execution plans, synthesizes results, manages retries
-  - `DataArchitectAgent`: Data preparation, joining, and schema management
-  - `DataAnalystTechnicalAgent`: Statistical analysis and hypothesis testing
-  - `DataAnalystBusinessAgent`: Business insights and final narrative generation
-  - `DataScientistAgent`: Machine learning and predictive modeling
+- **Components**: 10 specialized AI agents with adaptive intelligence
+  - **Core Agents (6)**:
+    - `OrchestratorAgent`: Converts natural language queries into structured briefings (JSON) with intent detection
+    - `TeamLeaderAgent`: Creates execution plans, synthesizes results, manages retries
+    - `DataArchitectAgent`: Data preparation, joining, and schema management
+    - `DataAnalystTechnicalAgent`: Statistical analysis and hypothesis testing
+    - `DataAnalystBusinessAgent`: Business insights and final narrative generation
+    - `DataScientistAgent`: Machine learning and predictive modeling
+  - **Domain-Specific Agents (4)**:
+    - `FinancialAgent`: Financial analysis (NPV, IRR, volatility, Black-Scholes)
+    - `MarketingAgent`: Marketing analytics (RFM, CAC, LTV, customer segmentation)
+    - `OperationalAgent`: Operational efficiency (productivity, bottlenecks, KPIs)
+    - `DataIntegrationAgent`: Federated data integration (SQL connectors, distributed queries)
 - **Features**:
   - Pydantic validation with auto-correction loops
   - Rate limiting integration
   - Robust JSON extraction (`clean_json_response()`)
+  - **Dual Response Mode**: Direct (concise) vs Complete (comprehensive) responses
+  - **Intent Detection**: Automatic classification of query complexity
 
 ### 3. Tool Layer
-- **Package**: `tools/` (21 modules, 122 functions)
-- **Registry**: `tool_registry.py` (81 registered tools with metadata)
+- **Package**: `tools/` (21 modules, 211 functions - 125 exported)
+- **Registry**: `tool_registry.py` (86 registered tools with metadata)
 - **Categories**:
   - **Data Profiling & Quality**: 15 functions (descriptive stats, data types, duplicates)
   - **Statistical Analysis**: 11 functions (t-tests, ANOVA, distribution tests)
@@ -96,6 +104,11 @@ The system follows a modular, multi-agent architecture with clear separation of 
   - Identifies independent tasks
   - ThreadPoolExecutor-based execution
   - Progress callbacks
+- **SmartCache**: Intelligent caching system
+  - Dual TTL: 5min for direct responses, 1h for complete analysis
+  - Query-based key generation with context
+  - Automatic cleanup of expired entries
+  - Memory-efficient storage
 - **MetricsCollector**: Performance tracking
   - Task duration monitoring
   - Success/error rate calculation
@@ -148,7 +161,7 @@ The system follows a modular, multi-agent architecture with clear separation of 
 
 ```
 tools/
-├── __init__.py                 # Central export hub (122 functions)
+├── __init__.py                 # Central export hub (125 exported functions)
 │
 ├── Core Analysis
 │   ├── data_profiling.py      # 15 functions
@@ -441,11 +454,13 @@ sequenceDiagram
 - Summarizes results for synthesis
 - Reduces token usage by ~70%
 
-### 3. Caching Strategies
-- Plan caching by intent hash
-- Reuses successful plans for similar queries
-- Session-based storage
-- Optional disk persistence
+### 3. Smart Caching (SmartCache)
+- Dual TTL adaptive caching system
+- **Direct responses**: 5-minute TTL for fast-expiring queries
+- **Complete analysis**: 1-hour TTL for comprehensive results
+- Query-based key generation with context awareness
+- Automatic cleanup of expired entries
+- Memory-efficient storage and retrieval
 
 ### 4. Rate Limiting
 - RPM tracking per LLM provider
@@ -468,7 +483,7 @@ sequenceDiagram
 - Fast execution (<5s total)
 
 ### Integration Tests
-- `test_tools_mapping.py`: Validates all 81 registered tools
+- `test_tools_mapping.py`: Validates all 86 registered tools
 - Tests default parameter generation
 - Ensures all tools execute without errors
 - Validates tool registry consistency
@@ -496,7 +511,7 @@ Note: 2 tests may show warnings for optional dependencies (TextBlob) but pass su
 ### From Monolithic to Modular
 
 **Before:**
-- Single `tools.py` file (~2200 lines, 122 functions)
+- Single `tools.py` file (~2200 lines, 122 functions initially)
 - No organization or categorization
 - Difficult to maintain and extend
 - No test coverage
@@ -504,9 +519,9 @@ Note: 2 tests may show warnings for optional dependencies (TextBlob) but pass su
 
 **After:**
 - 21 specialized modules in `tools/` package
-- Clear categorization (15 categories)
-- 122 functions properly exported via `__init__.py`
-- 81 tools registered with complete metadata
+- Clear categorization (21 categories)
+- 211 total functions (125 exported via `__init__.py`)
+- 86 tools registered with complete metadata
 - 23 tests with 100% pass rate
 - Comprehensive documentation
 - ExecutionEngine handles all execution logic
@@ -551,7 +566,7 @@ Note: 2 tests may show warnings for optional dependencies (TextBlob) but pass su
 
 - [MODULAR_ARCHITECTURE.md](./MODULAR_ARCHITECTURE.md): Detailed modular design (deprecated, merged into this document)
 - [EXECUTION_ENGINE.md](./EXECUTION_ENGINE.md): ExecutionEngine implementation details
-- [TOOLS_REFERENCE.md](./TOOLS_REFERENCE.md): Complete tool reference (122 functions)
+- [TOOLS_REFERENCE.md](./TOOLS_REFERENCE.md): Complete tool reference (125 exported functions)
 - [TESTING.md](./TESTING.md): Testing guidelines and coverage
 - [CONTRIBUTING.md](../CONTRIBUTING.md): Contribution guide
 

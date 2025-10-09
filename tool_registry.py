@@ -129,6 +129,8 @@ from tools import (
 from tools import (
     # Data Profiling
     descriptive_stats, get_data_types, check_duplicates,
+    get_central_tendency, get_variability, get_ranges,
+    get_value_counts, get_frequent_values,
     # Visualization
     plot_histogram, plot_boxplot, plot_scatter, plot_heatmap, plot_line_chart, plot_violin_plot, generate_chart,
     # Correlation
@@ -148,6 +150,7 @@ from tools import (
     run_kmeans_clustering, get_clusters_summary,
     # Time Series
     decompose_time_series, forecast_arima, add_time_features_from_seconds,
+    get_temporal_patterns,
     # Feature Engineering
     create_polynomial_features, create_interaction_features, create_rolling_features, create_lag_features, create_binning,
     # Business Analytics
@@ -213,6 +216,71 @@ TOOL_REGISTRY: Dict[str, ToolMetadata] = {
         get_defaults=lambda df: {'df': df},
         description="Return data types of each column",
         category="data_profiling"
+    ),
+    
+    'get_central_tendency': ToolMetadata(
+        function=get_central_tendency,
+        get_defaults=lambda df: {'df': df},
+        description="Calculate mean, median, and mode for numeric columns",
+        category="data_profiling",
+        requires_numeric=True
+    ),
+    
+    'get_variability': ToolMetadata(
+        function=get_variability,
+        get_defaults=lambda df: {'df': df},
+        description="Calculate standard deviation, variance, and range for numeric columns",
+        category="data_profiling",
+        requires_numeric=True
+    ),
+    
+    'get_ranges': ToolMetadata(
+        function=get_ranges,
+        get_defaults=lambda df: {'df': df},
+        description="Calculate minimum, maximum, and range for numeric columns",
+        category="data_profiling",
+        requires_numeric=True
+    ),
+    
+    'get_value_counts': ToolMetadata(
+        function=get_value_counts,
+        get_defaults=lambda df: {
+            'df': df,
+            'column': df.columns[0]
+        },
+        description="Count unique values in a column",
+        category="data_profiling"
+    ),
+    
+    'get_frequent_values': ToolMetadata(
+        function=get_frequent_values,
+        get_defaults=lambda df: {
+            'df': df,
+            'column': df.columns[0],
+            'top_n': 10
+        },
+        description="Get most and least frequent values in a column",
+        category="data_profiling"
+    ),
+    
+    'get_temporal_patterns': ToolMetadata(
+        function=get_temporal_patterns,
+        get_defaults=lambda df: {
+            'df': df,
+            'time_column': next((c for c in df.columns if 'time' in c.lower() or 'date' in c.lower()), df.columns[0])
+        },
+        description="Identify temporal patterns and trends in time series data",
+        category="time_series"
+    ),
+    
+    'get_clusters_summary': ToolMetadata(
+        function=get_clusters_summary,
+        get_defaults=lambda df: {
+            'df': df,
+            'cluster_column': 'cluster' if 'cluster' in df.columns else df.columns[-1]
+        },
+        description="Summarize characteristics of clusters",
+        category="clustering"
     ),
     
     'check_duplicates': ToolMetadata(
@@ -1284,3 +1352,333 @@ def validate_tool_for_dataframe(tool_name: str, df: pd.DataFrame) -> tuple[bool,
         return False, f"Tool '{tool_name}' not found in registry"
     
     return metadata.can_execute(df)
+
+
+def search_tools_by_keyword(keyword: str, df: Optional[pd.DataFrame] = None) -> list[str]:
+    """Search tools by keyword in name or description.
+    
+    Args:
+        keyword: Keyword to search for
+        df: Optional DataFrame to validate tools against
+        
+    Returns:
+        List of matching tool names
+    """
+    keyword_lower = keyword.lower()
+    matches = []
+    
+    for tool_name, metadata in TOOL_REGISTRY.items():
+        # Search in tool name
+        if keyword_lower in tool_name.lower():
+            matches.append(tool_name)
+            continue
+        
+        # Search in description
+        if keyword_lower in metadata.description.lower():
+            matches.append(tool_name)
+            continue
+    
+    # Filter by DataFrame compatibility if provided
+    if df is not None:
+        matches = [t for t in matches if validate_tool_for_dataframe(t, df)[0]]
+    
+    return matches
+
+
+def find_best_tool_for_query(query: str, df: Optional[pd.DataFrame] = None) -> Optional[str]:
+    """Find the best tool for a natural language query.
+    
+    Args:
+        query: Natural language query
+        df: Optional DataFrame to validate against
+        
+    Returns:
+        Best matching tool name or None
+    """
+    import unicodedata
+    
+    def normalize_text(text: str) -> str:
+        """Remove accents and normalize text for better matching."""
+        text = text.lower()
+        # Remove accents
+        text = ''.join(
+            c for c in unicodedata.normalize('NFD', text)
+            if unicodedata.category(c) != 'Mn'
+        )
+        return text
+    
+    query_lower = query.lower()
+    query_normalized = normalize_text(query)
+    
+    # Keyword mappings for common queries (order matters - more specific first)
+    keyword_mappings = {
+        # Data description - SPECIFIC FIRST
+        'tendência central': ['get_central_tendency'],
+        'tendencia central': ['get_central_tendency'],
+        'medidas de tendência': ['get_central_tendency'],
+        'medidas de tendencia': ['get_central_tendency'],
+        'média': ['get_central_tendency'],
+        'media': ['get_central_tendency'],
+        'mediana': ['get_central_tendency'],
+        'moda': ['get_central_tendency'],
+        'variância': ['get_variability'],
+        'variancia': ['get_variability'],
+        'variabilidade': ['get_variability'],
+        'desvio padrão': ['get_variability'],
+        'desvio padrao': ['get_variability'],
+        'desvio': ['get_variability'],
+        'intervalo': ['get_ranges'],
+        'mínimo': ['get_ranges'],
+        'minimo': ['get_ranges'],
+        'máximo': ['get_ranges'],
+        'maximo': ['get_ranges'],
+        'tipo': ['get_data_types'],
+        
+        # Patterns and trends - SPECIFIC PATTERNS FIRST
+        'padrões temporais': ['get_temporal_patterns'],
+        'padroes temporais': ['get_temporal_patterns'],
+        'temporal': ['get_temporal_patterns'],
+        'temporais': ['get_temporal_patterns'],
+        'sazonal': ['get_temporal_patterns'],
+        'sazonalidade': ['get_temporal_patterns'],
+        'frequente': ['get_frequent_values'],
+        'mais frequente': ['get_frequent_values'],
+        'menos frequente': ['get_frequent_values'],
+        
+        # Clustering - SPECIFIC FIRST
+        'faça clustering dos dados': ['run_kmeans_clustering'],
+        'faca clustering dos dados': ['run_kmeans_clustering'],
+        'fazer clustering dos dados': ['run_kmeans_clustering'],
+        'faça clustering': ['run_kmeans_clustering'],
+        'faca clustering': ['run_kmeans_clustering'],
+        'fazer clustering': ['run_kmeans_clustering'],
+        'clustering': ['run_kmeans_clustering'],
+        'clusterização': ['run_kmeans_clustering'],
+        'clusterizacao': ['run_kmeans_clustering'],
+        'agrupamento': ['run_kmeans_clustering'],
+        'agrupamentos': ['run_kmeans_clustering'],
+        'cluster': ['run_kmeans_clustering', 'get_clusters_summary'],
+        
+        # Anomalies
+        'outlier': ['detect_outliers'],
+        'atípico': ['detect_outliers'],
+        'atipico': ['detect_outliers'],
+        'anomalia': ['detect_outliers'],
+        'valores atípicos': ['detect_outliers'],
+        'valores atipicos': ['detect_outliers'],
+        
+        # Relationships
+        'correlação': ['correlation_matrix'],
+        'correlacao': ['correlation_matrix'],
+        'relação': ['get_variable_relations'],
+        'relacao': ['get_variable_relations'],
+        'influência': ['get_influential_variables'],
+        'influencia': ['get_influential_variables'],
+        
+        # Visualization
+        'histograma': ['plot_histogram'],
+        'boxplot': ['plot_boxplot'],
+        'dispersão': ['plot_scatter'],
+        'dispersao': ['plot_scatter'],
+        'scatter': ['plot_scatter'],
+        'heatmap': ['plot_heatmap'],
+        'distribuição': ['plot_histogram'],
+        'distribuicao': ['plot_histogram'],
+        
+        # Data quality
+        'duplicata': ['check_duplicates'],
+        'faltante': ['missing_data_analysis'],
+        'qualidade': ['data_profiling'],
+    }
+    
+    # Find matching tools - sort by keyword length (longest first) to match specific phrases first
+    sorted_keywords = sorted(keyword_mappings.items(), key=lambda x: len(x[0]), reverse=True)
+    
+    for keyword, tools in sorted_keywords:
+        # Try both original and normalized versions
+        keyword_normalized = normalize_text(keyword)
+        if keyword in query_lower or keyword_normalized in query_normalized:
+            # Return first valid tool
+            for tool in tools:
+                if df is None:
+                    return tool
+                can_execute, _ = validate_tool_for_dataframe(tool, df)
+                if can_execute:
+                    return tool
+    
+    return None
+
+
+def get_tools_for_dataframe(df: pd.DataFrame, category: Optional[str] = None) -> list[tuple[str, str]]:
+    """Get all tools that can execute on a given DataFrame.
+    
+    Args:
+        df: DataFrame to check
+        category: Optional category filter
+        
+    Returns:
+        List of tuples (tool_name, description) for valid tools
+    """
+    valid_tools = []
+    
+    tools_to_check = TOOL_REGISTRY.items()
+    if category:
+        tools_to_check = [(name, meta) for name, meta in tools_to_check if meta.category == category]
+    
+    for tool_name, metadata in tools_to_check:
+        can_execute, _ = metadata.can_execute(df)
+        if can_execute:
+            valid_tools.append((tool_name, metadata.description))
+    
+    return valid_tools
+
+
+def execute_tool(tool_name: str, df: pd.DataFrame, **kwargs) -> Any:
+    """Execute a tool by name with automatic parameter handling.
+    
+    Args:
+        tool_name: Name of the tool to execute
+        df: DataFrame to operate on
+        **kwargs: Additional parameters for the tool
+        
+    Returns:
+        Result of tool execution
+        
+    Raises:
+        ValueError: If tool not found or validation fails
+    """
+    metadata = TOOL_REGISTRY.get(tool_name)
+    if not metadata:
+        raise ValueError(f"Tool '{tool_name}' not found in registry")
+    
+    # Validate tool can execute
+    can_execute, reason = metadata.can_execute(df)
+    if not can_execute:
+        raise ValueError(f"Cannot execute {tool_name}: {reason}")
+    
+    # Get defaults and merge with provided kwargs
+    defaults = metadata.get_defaults(df)
+    params = {**defaults, **kwargs}
+    
+    # Execute tool
+    return metadata.function(**params)
+
+
+def get_tool_info(tool_name: str) -> Optional[Dict[str, Any]]:
+    """Get complete information about a tool.
+    
+    Args:
+        tool_name: Name of the tool
+        
+    Returns:
+        Dictionary with complete tool information or None if not found
+    """
+    metadata = TOOL_REGISTRY.get(tool_name)
+    if not metadata:
+        return None
+    
+    return {
+        'name': tool_name,
+        'description': metadata.description,
+        'category': metadata.category,
+        'requires_numeric': metadata.requires_numeric,
+        'requires_categorical': metadata.requires_categorical,
+        'min_rows': metadata.min_rows,
+        'min_numeric_cols': metadata.min_numeric_cols,
+        'min_categorical_cols': metadata.min_categorical_cols,
+        'function': metadata.function.__name__
+    }
+
+
+def get_tools_info_by_category() -> Dict[str, list[Dict[str, Any]]]:
+    """Get all tools organized by category with complete information.
+    
+    Returns:
+        Dictionary mapping category names to lists of tool info dicts
+    """
+    result = {}
+    
+    for tool_name, metadata in TOOL_REGISTRY.items():
+        category = metadata.category
+        if category not in result:
+            result[category] = []
+        
+        result[category].append({
+            'name': tool_name,
+            'description': metadata.description,
+            'requires_numeric': metadata.requires_numeric,
+            'requires_categorical': metadata.requires_categorical,
+            'min_rows': metadata.min_rows
+        })
+    
+    return result
+
+
+def recommend_tools_for_dataframe(df: pd.DataFrame, top_n: int = 10) -> list[Dict[str, Any]]:
+    """Recommend most relevant tools for a DataFrame based on its characteristics.
+    
+    Args:
+        df: DataFrame to analyze
+        top_n: Number of recommendations to return
+        
+    Returns:
+        List of recommended tools with scores and reasons
+    """
+    recommendations = []
+    
+    # Analyze DataFrame characteristics
+    n_rows = len(df)
+    num_cols = df.select_dtypes(include='number').columns.tolist()
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    has_time = any('time' in c.lower() or 'date' in c.lower() for c in df.columns)
+    has_class = 'class' in df.columns
+    
+    for tool_name, metadata in TOOL_REGISTRY.items():
+        can_execute, _ = metadata.can_execute(df)
+        if not can_execute:
+            continue
+        
+        score = 0
+        reasons = []
+        
+        # Score based on data characteristics
+        if metadata.category == 'data_profiling':
+            score += 10
+            reasons.append("Essential for understanding data")
+        
+        if metadata.category == 'visualization' and len(num_cols) > 0:
+            score += 8
+            reasons.append("Good for exploring numeric data")
+        
+        if metadata.category == 'correlation_analysis' and len(num_cols) >= 2:
+            score += 9
+            reasons.append("Multiple numeric columns detected")
+        
+        if metadata.category == 'outlier_detection' and len(num_cols) > 0:
+            score += 7
+            reasons.append("Useful for data quality")
+        
+        if metadata.category == 'time_series' and has_time:
+            score += 9
+            reasons.append("Time column detected")
+        
+        if metadata.category == 'machine_learning' and has_class and len(num_cols) >= 2:
+            score += 8
+            reasons.append("Classification target detected")
+        
+        if metadata.category == 'clustering' and len(num_cols) >= 2 and n_rows >= 20:
+            score += 7
+            reasons.append("Sufficient data for clustering")
+        
+        if score > 0:
+            recommendations.append({
+                'tool': tool_name,
+                'description': metadata.description,
+                'category': metadata.category,
+                'score': score,
+                'reasons': reasons
+            })
+    
+    # Sort by score and return top N
+    recommendations.sort(key=lambda x: x['score'], reverse=True)
+    return recommendations[:top_n]

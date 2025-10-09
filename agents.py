@@ -7,12 +7,17 @@ from pydantic import BaseModel, Field, ValidationError
 from typing import Dict, Any, List, Optional, Literal, Callable
 import sys
 from pathlib import Path
+import pandas as pd
 
 # Ensure local module resolution for 'prompts.py' to avoid shadowing by similarly named external packages
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from prompts import (ORCHESTRATOR_PROMPT, TEAM_LEADER_PROMPT, 
-                     SYNTHESIS_PROMPT, FINAL_RESPONSE_PROMPT)
+                     SYNTHESIS_PROMPT, FINAL_RESPONSE_PROMPT,
+                     FINANCIAL_AGENT_DIRECT_PROMPT, FINANCIAL_AGENT_COMPLETE_PROMPT,
+                     MARKETING_AGENT_DIRECT_PROMPT, MARKETING_AGENT_COMPLETE_PROMPT,
+                     OPERATIONAL_AGENT_DIRECT_PROMPT, OPERATIONAL_AGENT_COMPLETE_PROMPT,
+                     DATA_INTEGRATION_AGENT_DIRECT_PROMPT, DATA_INTEGRATION_AGENT_COMPLETE_PROMPT)
 from prompt_templates import (get_orchestrator_prompt, get_team_leader_plan_prompt,
                               get_synthesis_prompt, get_final_response_prompt)
 from rate_limiter import RateLimiter
@@ -127,7 +132,7 @@ class BriefingModel(BaseModel):
     key_questions: List[str]
     main_intent: str
     deliverables: List[str]
-    tool: Optional[str] = None
+    response_mode: Literal['direct', 'complete'] = 'complete'
 
 
 AgentName = Literal[
@@ -135,6 +140,10 @@ AgentName = Literal[
     "DataAnalystTechnicalAgent",
     "DataAnalystBusinessAgent",
     "DataScientistAgent",
+    "FinancialAgent",
+    "MarketingAgent",
+    "OperationalAgent",
+    "DataIntegrationAgent",
 ]
 
 ToolName = Literal[
@@ -264,6 +273,37 @@ class OrchestratorAgent(BaseAgent):
         try:
             briefing = BriefingModel.model_validate(data)
             result = briefing.model_dump()
+            
+            # Detect response mode based on query complexity
+            query = (user_query or '').lower()
+            
+            # Keywords indicating direct/simple response
+            direct_keywords = [
+                'qual', 'quais', 'quanto', 'quantos', 'quantas', 'mostre', 'exiba', 'liste',
+                'média', 'media', 'mediana', 'mínimo', 'minimo', 'máximo', 'maximo',
+                'total', 'soma', 'contagem', 'contar', 'número', 'numero',
+                'valor', 'resultado', 'resposta', 'calcule', 'calcular'
+            ]
+            
+            # Keywords indicating complete/complex analysis
+            complete_keywords = [
+                'análise', 'analise', 'estude', 'estudar', 'avalie', 'avaliar',
+                'complete', 'completa', 'profunda', 'detalhada', 'detalhado',
+                'exploratória', 'exploratoria', 'investigue', 'investigar',
+                'faça uma', 'faca uma', 'realize', 'realizar', 'execute', 'executar'
+            ]
+            
+            # Check for direct mode (simple questions)
+            if any(kw in query for kw in direct_keywords):
+                # Additional check: if it's a very simple query with few words
+                words = query.split()
+                if len(words) <= 10 and not any(kw in query for kw in complete_keywords):
+                    result['response_mode'] = 'direct'
+            
+            # Check for complete mode (explicit complex requests)
+            if any(kw in query for kw in complete_keywords):
+                result['response_mode'] = 'complete'
+            
             # Heuristic backfill for missing tool
             try:
                 if (result.get('tool') is None or str(result.get('tool')).strip() == ''):
@@ -325,16 +365,73 @@ class OrchestratorAgent(BaseAgent):
 
 class TeamLeaderAgent(BaseAgent):
     def create_plan(self, briefing: dict) -> dict:
+        response_mode = briefing.get('response_mode', 'complete')
+        
+        # For direct mode, create a simplified plan with single task
+        if response_mode == 'direct':
+            return self._create_direct_plan(briefing)
+        
+        # For complete mode, use the existing complex planning logic
+        return self._create_complete_plan(briefing)
+    
+    def _create_direct_plan(self, briefing: dict) -> dict:
+        """Create a simplified plan for direct responses."""
+        tool = briefing.get('tool', 'descriptive_stats')
+        
+        # Map tool to appropriate agent
+        agent_mapping = {
+            'DataArchitectAgent': ['clean_data', 'validate_and_clean_dataframe', 'smart_type_inference'],
+            'DataAnalystTechnicalAgent': ['get_central_tendency', 'get_variability', 'get_ranges', 
+                                        'correlation_matrix', 'detect_outliers', 'perform_t_test'],
+            'DataAnalystBusinessAgent': ['get_value_counts', 'get_frequent_values', 'rfm_analysis'],
+            'DataScientistAgent': ['linear_regression', 'evaluate_model', 'run_kmeans_clustering']
+        }
+        
+        agent = 'DataAnalystTechnicalAgent'  # default
+        for agent_name, tools in agent_mapping.items():
+            if tool in tools:
+                agent = agent_name
+                break
+        
+        plan = {
+            "execution_plan": [
+                {
+                    "task_id": 1,
+                    "description": f"Execute {tool} for direct response",
+                    "agent_responsible": agent,
+                    "tool_to_use": tool,
+                    "dependencies": [],
+                    "inputs": {},
+                    "output_variable": "direct_result"
+                }
+            ]
+        }
+        return plan
+    
+    def _create_complete_plan(self, briefing: dict) -> dict:
         # Try up to 2 correction rounds when validation fails
         error_note = None
         for attempt in range(3):
             # Use dynamic prompt with agent profile
             try:
-                # Build dynamic tools list from registry
+                # Build enriched tools list from registry with descriptions
+                from tool_registry import get_tools_info_by_category
+                tools_by_category = get_tools_info_by_category()
+                
+                # Format as readable list with categories
+                tools_lines = []
+                for category, tools in sorted(tools_by_category.items()):
+                    category_display = category.replace('_', ' ').title()
+                    tools_lines.append(f"\n**{category_display}:**")
+                    for tool_info in tools[:5]:  # Limit to 5 per category to avoid token overflow
+                        tools_lines.append(f"  - {tool_info['name']}: {tool_info['description']}")
+                
+                tools_list = "\n".join(tools_lines)
+            except Exception:
+                # Fallback to simple list
                 from tool_registry import get_available_tools
                 tools_list = " | ".join(get_available_tools())
-            except Exception:
-                tools_list = ""
+            
             prompt = get_team_leader_plan_prompt(json.dumps(briefing, indent=2), tools_list=tools_list)
             if error_note:
                 prompt += f"\n\nATENÇÃO: O plano anterior era inválido pelos seguintes motivos de validação. Corrija e retorne APENAS JSON válido no schema exigido.\nErros: {error_note}\n"
@@ -408,9 +505,31 @@ class SpecialistAgent(BaseAgent):
 class DataArchitectAgent(SpecialistAgent): pass
 class DataAnalystTechnicalAgent(SpecialistAgent): pass
 class DataAnalystBusinessAgent(SpecialistAgent):
-    def generate_final_response(self, synthesis_report: str, memory_context: str, tools_used: List[str] = None):
-        # Use dynamic prompt with agent profile and tool context
-        prompt = get_final_response_prompt(synthesis_report, memory_context, tools_used=tools_used)
+    def generate_final_response(self, synthesis_report: str, memory_context: str, tools_used: List[str] = None, response_mode: str = 'complete'):
+        # Adjust response style based on mode
+        if response_mode == 'direct':
+            # For direct mode, create a concise response with actual values
+            prompt = f"""Gere uma resposta DIRETA e CONCISA baseada no relatório de síntese.
+
+Relatório de Síntese: {synthesis_report}
+
+Contexto de Memória: {memory_context}
+
+Ferramentas Usadas: {', '.join(tools_used or [])}
+
+INSTRUÇÕES PARA RESPOSTA DIRETA:
+- Seja extremamente conciso
+- SEMPRE inclua os valores numéricos calculados (médias, medianas, totais, etc.)
+- Apresente os resultados em formato claro: "Média: X, Mediana: Y"
+- Use no máximo 3-4 frases
+- Não inclua explicações longas ou contexto adicional
+- Formate como uma resposta direta à pergunta do usuário
+- Se houver múltiplas colunas, liste os valores principais
+
+Resposta:"""
+        else:
+            # For complete mode, use the existing detailed prompt
+            prompt = get_final_response_prompt(synthesis_report, memory_context, tools_used=tools_used)
         
         # Execute with rate limiting (streaming mode)
         def _execute():
@@ -423,3 +542,157 @@ class DataAnalystBusinessAgent(SpecialistAgent):
         )
 
 class DataScientistAgent(SpecialistAgent): pass
+
+# Domain-Specific Agents
+class FinancialAgent(SpecialistAgent):
+    """Specialized agent for financial analysis and modeling."""
+    
+    def generate_final_response(self, synthesis_report: str, memory_context: str, tools_used: List[str] = None, response_mode: str = 'complete'):
+        # Financial-specific prompt adjustments
+        if response_mode == 'direct':
+            prompt = FINANCIAL_AGENT_DIRECT_PROMPT.format(
+                synthesis_report=synthesis_report,
+                memory_context=memory_context,
+                tools_used=', '.join(tools_used or [])
+            )
+        else:
+            prompt = FINANCIAL_AGENT_COMPLETE_PROMPT.format(
+                synthesis_report=synthesis_report,
+                memory_context=memory_context,
+                tools_used=', '.join(tools_used or [])
+            )
+        
+        def _execute():
+            return self.llm.stream(prompt)
+        
+        return self.rate_limiter.execute_with_retry(
+            _execute,
+            max_retries=3,
+            on_wait=self.wait_callback
+        )
+
+class MarketingAgent(SpecialistAgent):
+    """Specialized agent for marketing analytics and customer insights."""
+    
+    def generate_final_response(self, synthesis_report: str, memory_context: str, tools_used: List[str] = None, response_mode: str = 'complete'):
+        # Marketing-specific prompt adjustments
+        if response_mode == 'direct':
+            prompt = MARKETING_AGENT_DIRECT_PROMPT.format(
+                synthesis_report=synthesis_report,
+                memory_context=memory_context,
+                tools_used=', '.join(tools_used or [])
+            )
+        else:
+            prompt = MARKETING_AGENT_COMPLETE_PROMPT.format(
+                synthesis_report=synthesis_report,
+                memory_context=memory_context,
+                tools_used=', '.join(tools_used or [])
+            )
+        
+        def _execute():
+            return self.llm.stream(prompt)
+        
+        return self.rate_limiter.execute_with_retry(
+            _execute,
+            max_retries=3,
+            on_wait=self.wait_callback
+        )
+
+class OperationalAgent(SpecialistAgent):
+    """Specialized agent for operational efficiency and process optimization."""
+    
+    def generate_final_response(self, synthesis_report: str, memory_context: str, tools_used: List[str] = None, response_mode: str = 'complete'):
+        # Operational-specific prompt adjustments
+        if response_mode == 'direct':
+            prompt = OPERATIONAL_AGENT_DIRECT_PROMPT.format(
+                synthesis_report=synthesis_report,
+                memory_context=memory_context,
+                tools_used=', '.join(tools_used or [])
+            )
+        else:
+            prompt = OPERATIONAL_AGENT_COMPLETE_PROMPT.format(
+                synthesis_report=synthesis_report,
+                memory_context=memory_context,
+                tools_used=', '.join(tools_used or [])
+            )
+        
+        def _execute():
+            return self.llm.stream(prompt)
+        
+        return self.rate_limiter.execute_with_retry(
+            _execute,
+            max_retries=3,
+            on_wait=self.wait_callback
+        )
+
+class DataIntegrationAgent(SpecialistAgent):
+    """Specialized agent for data integration and federated queries."""
+    
+    def __init__(self, llm, rpm_limit=10, rate_limiter=None):
+        super().__init__(llm, rpm_limit, rate_limiter)
+        self.connectors = {}  # Will hold active data connectors
+    
+    def establish_connection(self, config: Dict[str, Any]) -> bool:
+        """Establish connection to external data source."""
+        try:
+            from data_connectors import ConnectionConfig, SQLConnector
+            
+            conn_config = ConnectionConfig(**config)
+            connector = SQLConnector(conn_config)
+            
+            if connector.connect():
+                connection_id = f"{config.get('source_type')}_{config.get('database', 'default')}"
+                self.connectors[connection_id] = connector
+                return True
+            return False
+            
+        except Exception as e:
+            print(f"Failed to establish connection: {e}")
+            return False
+    
+    def execute_federated_query(self, query: str, connection_id: str) -> pd.DataFrame:
+        """Execute query on external data source."""
+        if connection_id not in self.connectors:
+            raise ValueError(f"Connection {connection_id} not established")
+        
+        connector = self.connectors[connection_id]
+        return connector.query(query)
+    
+    def merge_datasets(self, datasets: List[pd.DataFrame], merge_strategy: str = 'union') -> pd.DataFrame:
+        """Merge multiple datasets using specified strategy."""
+        if not datasets:
+            return pd.DataFrame()
+        
+        if merge_strategy == 'union':
+            # Simple concatenation
+            return pd.concat(datasets, ignore_index=True)
+        elif merge_strategy == 'join':
+            # More complex join logic would go here
+            # For now, return first dataset
+            return datasets[0]
+        else:
+            return datasets[0]
+    
+    def generate_final_response(self, synthesis_report: str, memory_context: str, tools_used: List[str] = None, response_mode: str = 'complete'):
+        # Data integration specific prompt adjustments
+        if response_mode == 'direct':
+            prompt = DATA_INTEGRATION_AGENT_DIRECT_PROMPT.format(
+                synthesis_report=synthesis_report,
+                memory_context=memory_context,
+                tools_used=', '.join(tools_used or [])
+            )
+        else:
+            prompt = DATA_INTEGRATION_AGENT_COMPLETE_PROMPT.format(
+                synthesis_report=synthesis_report,
+                memory_context=memory_context,
+                tools_used=', '.join(tools_used or [])
+            )
+        
+        def _execute():
+            return self.llm.stream(prompt)
+        
+        return self.rate_limiter.execute_with_retry(
+            _execute,
+            max_retries=3,
+            on_wait=self.wait_callback
+        )

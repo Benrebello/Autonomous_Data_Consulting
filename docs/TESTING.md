@@ -20,7 +20,7 @@ tests/
 ├── test_file_operations.py               # Excel export tests
 ├── test_time_features.py                 # Time feature extraction
 ├── test_types.py                         # Type validation tests
-├── test_tools_mapping.py                 # Integration test (81 tools)
+├── test_tools_mapping.py                 # Integration test (86 tools)
 └── ... (2 more test files)
 ```
 
@@ -32,7 +32,7 @@ tests/
 - Focus on function correctness
 
 ### 2. Integration Testing
-- `test_tools_mapping.py`: Validates all 81 registered tools
+- `test_tools_mapping.py`: Validates all 86 registered tools
 - Tests automatic parameter generation
 - Ensures tools execute without errors
 - Validates return types

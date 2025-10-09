@@ -750,3 +750,100 @@ class ExecutionEngine:
                 completed_tasks.remove(dependent_id)
                 # Recursively invalidate
                 self._invalidate_dependents(dependent_id, dependencies, completed_tasks)
+
+
+# ============================================================================
+# SMART CACHE SYSTEM
+# ============================================================================
+
+class SmartCache:
+    """Intelligent caching system with dual TTL for different response modes."""
+    
+    def __init__(self, direct_ttl_seconds: int = 300, complete_ttl_seconds: int = 3600):  # 5min direct, 1h complete
+        self.direct_ttl = direct_ttl_seconds
+        self.complete_ttl = complete_ttl_seconds
+        self.cache = {
+            'direct': {},    # Fast-expiring cache for direct responses
+            'complete': {}   # Longer-expiring cache for complete responses
+        }
+    
+    def _generate_key(self, query: str, context: str = "") -> str:
+        """Generate a unique cache key from query and context."""
+        key_data = f"{query}|{context}"
+        return hashlib.md5(key_data.encode()).hexdigest()
+    
+    def _is_expired(self, entry: Dict, ttl_seconds: int) -> bool:
+        """Check if cache entry is expired."""
+        cached_time = entry.get('timestamp', 0)
+        current_time = time.time()
+        return (current_time - cached_time) > ttl_seconds
+    
+    def get(self, query: str, response_mode: str, context: str = "") -> Optional[Any]:
+        """Retrieve from cache if available and not expired."""
+        if response_mode not in self.cache:
+            return None
+            
+        cache_key = self._generate_key(query, context)
+        cache_entry = self.cache[response_mode].get(cache_key)
+        
+        if cache_entry is None:
+            return None
+            
+        ttl = self.direct_ttl if response_mode == 'direct' else self.complete_ttl
+        
+        if self._is_expired(cache_entry, ttl):
+            # Remove expired entry
+            del self.cache[response_mode][cache_key]
+            return None
+            
+        return cache_entry['result']
+    
+    def set(self, query: str, response_mode: str, result: Any, context: str = "") -> None:
+        """Store result in appropriate cache."""
+        if response_mode not in self.cache:
+            return
+            
+        cache_key = self._generate_key(query, context)
+        self.cache[response_mode][cache_key] = {
+            'result': result,
+            'timestamp': time.time(),
+            'query': query,
+            'context': context
+        }
+    
+    def clear_expired(self) -> int:
+        """Clear all expired entries and return count of cleared items."""
+        cleared_count = 0
+        
+        for cache_type, cache_dict in self.cache.items():
+            ttl = self.direct_ttl if cache_type == 'direct' else self.complete_ttl
+            
+            expired_keys = []
+            for key, entry in cache_dict.items():
+                if self._is_expired(entry, ttl):
+                    expired_keys.append(key)
+            
+            for key in expired_keys:
+                del cache_dict[key]
+                cleared_count += 1
+        
+        return cleared_count
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        return {
+            'direct_entries': len(self.cache['direct']),
+            'complete_entries': len(self.cache['complete']),
+            'total_entries': len(self.cache['direct']) + len(self.cache['complete'])
+        }
+
+
+# Global cache instance
+_smart_cache = None
+
+def get_smart_cache() -> SmartCache:
+    """Get or create global smart cache instance."""
+    global _smart_cache
+    if _smart_cache is None:
+        _smart_cache = SmartCache()
+    return _smart_cache

@@ -19,7 +19,7 @@ from agents import (OrchestratorAgent, TeamLeaderAgent, DataArchitectAgent,
 import tools
 # Ensure local module resolution for 'prompts.py' to avoid shadowing by similarly named external packages
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from prompts import QA_REVIEW_PROMPT
+from prompts import QA_REVIEW_PROMPT, INTENT_DETECTION_PROMPT
 from rate_limiter import RateLimiter, get_rate_limiter
 from ui_components import (RateLimitHandler, display_rate_limit_info,
                            stream_response_to_chat, cleanup_old_plot_files, generate_pdf_report)
@@ -224,6 +224,52 @@ class AnalysisPipeline:
         except Exception:
             pass
 
+    def execute_replay(self, tool: str, inputs: dict, user_query: str = "") -> None:
+        """Reexecute a single tool with provided inputs and render result.
+
+        This is used by the sidebar/session history 'Reexecutar esta análise'.
+        It does not bypass the multiagent architecture globally; it simply
+        replays a previously executed tool with resolved defaults/context.
+        """
+        st.write("3. **Reexecução Direta:** Executando ferramenta previamente selecionada...")
+        if tool not in self.tool_mapping:
+            st.error(f"Ferramenta não encontrada no mapeamento: {tool}")
+            return
+        # Preencher defaults e resolver referências de contexto
+        filled = self._fill_default_inputs_for_task(tool, inputs or {})
+        resolved = self._resolve_inputs(filled)
+        # Executar tool
+        result = self.tool_mapping[tool](**resolved)
+        self._set('last_result', {
+            'tool': tool,
+            'inputs': resolved,
+            'result': result if isinstance(result, (dict, list, str, int, float)) else str(type(result))
+        })
+        self._set('intent_mode', 'replay')
+        self._set('last_tool', tool)
+        # Compor resposta concisa baseada no resultado
+        composed = self._compose_response(topic=user_query or f"Replay: {tool}", result=result, style=self._get('response_style', 'Padrão'))
+        with st.chat_message("assistant"):
+            st.markdown(composed)
+            if isinstance(result, bytes):
+                st.image(result)
+            # Render latest chart if present
+            if 'charts' in st.session_state and st.session_state.charts:
+                last_chart = st.session_state.charts[-1]
+                if isinstance(last_chart, dict) and 'bytes' in last_chart:
+                    st.image(last_chart['bytes'], caption=last_chart.get('caption'))
+                    st.download_button(
+                        label="Baixar gráfico",
+                        data=last_chart['bytes'],
+                        file_name="chart_last.png",
+                        mime="image/png",
+                        key=f"dl_last_chart_replay_{len(st.session_state.charts)}"
+                    )
+        # Persistir no histórico
+        ch = st.session_state.get('chat_history', [])
+        ch.append({'role': 'assistant', 'text': composed})
+        st.session_state['chat_history'] = ch
+
     def _get(self, key: str, default=None):
         """Typed state getter with legacy fallback to st.session_state."""
         try:
@@ -247,88 +293,139 @@ class AnalysisPipeline:
         return s if len(s) <= max_len else s[:max_len] + "... [truncated]"
 
     def _suggest_possible_analyses(self) -> list[str]:
-        """Return a lightweight, heuristic list of analyses based on the default dataframe.
+        """Return intelligent recommendations based on tool_registry and DataFrame characteristics.
 
-        The goal is to avoid triggering the full multi-agent plan for generic queries
-        like "quais análises podem ser feitas?" by providing fast suggestions only.
+        Uses tool_registry's recommendation system to suggest most relevant tools.
         """
+        from tool_registry import recommend_tools_for_dataframe, get_tools_for_dataframe
+        
         suggestions: list[str] = []
         if not self.dataframes:
             return [
                 "Upload um dataset para habilitar sugestões contextuais.",
                 "Análises comuns: estatísticas descritivas, verificação de duplicatas, correlação, histogramas."
             ]
+        
         df = next(iter(self.dataframes.values()))
         if df.empty:
             return ["O dataset está vazio. Adicione dados para gerar sugestões."]
-        # Always useful
-        suggestions.append("Estatísticas descritivas e tipos de dados.")
-        suggestions.append("Verificação de valores ausentes e duplicados.")
-        # Numeric signals
-        num_cols = list(df.select_dtypes(include=['number']).columns)
-        if len(num_cols) >= 1:
-            suggestions.append("Histogramas/Boxplots para variáveis numéricas.")
-            if len(num_cols) >= 2:
-                suggestions.append("Matriz de correlação e scatter plots entre variáveis numéricas.")
-        # Categorical signals
-        cat_cols = list(df.select_dtypes(include=['object', 'category']).columns)
-        if cat_cols:
-            suggestions.append("Contagem de valores e frequência de categorias.")
-            suggestions.append("Tabelas dinâmicas (pivot) por categorias.")
-        # Time/geo/text
-        has_time = any('time' in c.lower() or 'data' in c.lower() or 'date' in c.lower() for c in df.columns)
-        if has_time:
-            suggestions.append("Padrões temporais e gráficos de linha.")
-        if {'latitude','longitude'}.issubset(set(df.columns)):
-            suggestions.append("Mapa geoespacial simples (latitude/longitude).")
-        if any('text' in c.lower() for c in df.columns):
-            suggestions.append("Wordcloud e análise de tópicos/sentimento para colunas de texto.")
-        # Modeling quick wins
-        if 'class' in df.columns and len(num_cols) >= 1:
-            suggestions.append("Modelos simples (logística, árvore/forest) para prever 'class'.")
+        
+        # Get intelligent recommendations from tool_registry
+        recommendations = recommend_tools_for_dataframe(df, top_n=10)
+        
+        if recommendations:
+            suggestions.append("### Análises Recomendadas (baseadas nas características dos seus dados):\n")
+            
+            # Group by category for better organization
+            by_category = {}
+            for rec in recommendations:
+                cat = rec['category']
+                if cat not in by_category:
+                    by_category[cat] = []
+                by_category[cat].append(rec)
+            
+            # Display top recommendations by category
+            for category, recs in sorted(by_category.items(), key=lambda x: max(r['score'] for r in x[1]), reverse=True):
+                category_display = category.replace('_', ' ').title()
+                suggestions.append(f"\n**{category_display}:**")
+                
+                for rec in recs[:3]:  # Top 3 per category
+                    reasons_str = ', '.join(rec['reasons'][:2])  # Top 2 reasons
+                    suggestions.append(f"  • `{rec['tool']}` - {rec['description']}")
+                    suggestions.append(f"    _{reasons_str}_")
+        
+        # Add quick action suggestions
+        suggestions.append("\n### ⚡ Ações Rápidas:")
+        suggestions.append("  • Digite: _'Quais são as medidas de tendência central?'_")
+        suggestions.append("  • Digite: _'Existem outliers nos dados?'_")
+        suggestions.append("  • Digite: _'Qual a correlação entre variáveis?'_")
+        suggestions.append("  • Digite: _'Faça uma análise exploratória completa'_")
+        
         return suggestions
 
-    def _infer_intent_from_text(self, text: str, simple_mappings: dict) -> Dict[str, Any]:
+    def _infer_intent_from_text(self, text: str, simple_mappings: dict = None) -> Dict[str, Any]:
         """Infer user's desired interaction depth and optional tool from free text.
 
-        Heuristics based on keywords. Returns a briefing-like dict fragment:
-        { 'intent': 'simple_suggestions'|'simple_analysis'|'full_plan',
-          'tool': Optional[str], 'objective': Optional[str], 'deliverables': Optional[list[str]] }
+        Enhanced version with tool_registry integration for dynamic tool discovery.
         """
+        from tool_registry import find_best_tool_for_query
+        
         t = (text or "").lower()
-        # Depth keywords
-        kw_suggestions = ["sugest", "ideia", "opção", "opcoes", "o que fazer", "quais análises", "quais analises"]
-        kw_direct = ["direta", "apenas", "só", "so ", "uma ferramenta", "rodar", "executar", "faça", "faca"]
-        kw_full = ["plano", "completo", "profund", "detalhado", "multiagente", "passos"]
+        
+        # Enhanced depth keywords with more patterns
+        kw_suggestions = [
+            "sugest", "ideia", "opção", "opcoes", "o que fazer", "quais análises", "quais analises",
+            "possibilidades", "alternativas", "recomenda", "aconselha"
+        ]
+        kw_direct = [
+            'direta', 'apenas', 'só', 'so ', 'uma ferramenta', 'rodar', 'executar', 'faça', 'faca',
+            'calcule', 'mostre', 'exiba', 'responda', 'qual', 'quais', 'quanto', 'quantos', 'quantas',
+            'média', 'media', 'mediana', 'mínimo', 'minimo', 'máximo', 'maximo', 'total', 'soma'
+        ]
+        kw_complete = [
+            "plano", "completo", "profund", "detalhado", "detalhado", "multiagente", "passos",
+            "análise", "analise", "estude", "estudar", "avalie", "avaliar", "investigue", "investigar",
+            "relatório", "report", "completa", "abrangente", "exaustiva"
+        ]
 
         intent = None
+        confidence = 0
+        
+        # Check for suggestion intent
         if any(k in t for k in kw_suggestions):
             intent = 'simple_suggestions'
-        elif any(k in t for k in kw_direct):
-            intent = 'simple_analysis'
-        elif any(k in t for k in kw_full):
+            confidence = 0.8
+        
+        # Check for direct intent (with enhanced pattern matching)
+        direct_matches = sum(1 for k in kw_direct if k in t)
+        if direct_matches > 0 or len(t.split()) <= 8:  # Short queries likely direct
+            # Additional check: if it's a question starting with wh-words or simple requests
+            if not any(k in t for k in kw_complete):
+                intent = 'simple_analysis'
+                confidence = 0.9
+        
+        # Check for complete intent (explicit complex requests)
+        if any(k in t for k in kw_complete):
             intent = 'full_plan'
-
-        # Tool mapping attempt
-        inferred_tool = None
-        for keyword, tool in simple_mappings.items():
-            if keyword in t:
-                inferred_tool = tool
+            confidence = 0.95
+        
+        # Domain detection for specialized agents
+        domain_hints = {
+            'financial': ['financeiro', 'financeira', 'npv', 'tir', 'volatilidade', 'investimento', 'retorno', 'lucro'],
+            'marketing': ['marketing', 'cliente', 'campanha', 'conversão', 'segmentação', 'rfm', 'cac', 'ltv'],
+            'operational': ['operacional', 'processo', 'eficiência', 'produtividade', 'qualidade', 'gargalo'],
+            'integration': ['integração', 'conectar', 'banco', 'sql', 'api', 'federado', 'fonte externa']
+        }
+        
+        detected_domain = None
+        for domain, keywords in domain_hints.items():
+            if any(k in t for k in keywords):
+                detected_domain = domain
                 break
-
-        # Deliverables extraction (very light-weight)
+        
+        # Use tool_registry for dynamic tool discovery
+        df_default = self.dataframes.get(next(iter(self.dataframes.keys()))) if self.dataframes else None
+        inferred_tool = find_best_tool_for_query(text, df_default)
+        
+        # Enhanced deliverables extraction
         deliverables = []
-        if any(k in t for k in ["pdf"]):
+        if any(k in t for k in ["pdf", "relatório", "report"]):
             deliverables.append("PDF")
-        if any(k in t for k in ["gráfico", "grafico", "gráficos", "graficos", "plot"]):
+        if any(k in t for k in ["gráfico", "grafico", "gráficos", "graficos", "plot", "visualiza"]):
             deliverables.append("Gráficos")
-        if any(k in t for k in ["tabela", "table"]):
+        if any(k in t for k in ["tabela", "table", "dados"]):
             deliverables.append("Tabela")
-        if any(k in t for k in ["resumo", "sumário", "sumario", "texto"]):
+        if any(k in t for k in ["resumo", "sumário", "sumario", "texto", "explicação"]):
             deliverables.append("Resumo textual")
-        deliverables = list(dict.fromkeys(deliverables)) or None
-
-        return {"intent": intent or 'full_plan', "tool": inferred_tool, "objective": text, "deliverables": deliverables}
+        
+        return {
+            "intent": intent or 'full_plan', 
+            "tool": inferred_tool, 
+            "objective": text, 
+            "deliverables": list(dict.fromkeys(deliverables)) or None,
+            "confidence": confidence,
+            "detected_domain": detected_domain
+        }
 
     def _make_summary_signature(self, topic: str, tool: str, result: Any) -> str:
         """Create a lightweight signature to detect repeated narratives."""
@@ -375,6 +472,28 @@ class AnalysisPipeline:
                         bullets.append(f"  ... e mais {len(sig_corrs)-3} correlações")
                 else:
                     bullets.append("Nenhuma correlação significativa encontrada")
+            # Tendência central: formatar mean/median de forma amigável
+            elif 'mean' in result and 'median' in result \
+                and isinstance(result.get('mean'), dict) and isinstance(result.get('median'), dict):
+                mean_map = result.get('mean') or {}
+                median_map = result.get('median') or {}
+                cols = list(mean_map.keys())
+                bullets.append(f"Métricas calculadas para {len(cols)} colunas numéricas.")
+                # Amostra de até 5 colunas com valores arredondados
+                for col in cols[:5]:
+                    m = mean_map.get(col)
+                    md = median_map.get(col)
+                    try:
+                        m_str = f"{float(m):.4f}" if m is not None else "N/A"
+                    except Exception:
+                        m_str = str(m)[:50]
+                    try:
+                        md_str = f"{float(md):.4f}" if md is not None else "N/A"
+                    except Exception:
+                        md_str = str(md)[:50]
+                    bullets.append(f"{col}: mean={m_str} | median={md_str}")
+                if len(cols) > 5:
+                    bullets.append(f"... e mais {len(cols)-5} colunas")
             else:
                 # Outros dicts: comportamento normal mas com limite
                 for k, v in list(result.items())[:10]:  # Máximo 10 keys
@@ -449,6 +568,44 @@ class AnalysisPipeline:
                 lines.append("\nRecomendações:")
                 lines.extend([f"- {r}" for r in recs])
             return "\n".join(lines)
+
+    def _auto_visualize_for_tool(self, tool_name: str) -> None:
+        """Automatically create a relevant chart using visualization tools.
+
+        This uses the existing visualization tools and stores chart bytes in
+        st.session_state.charts so the UI can render and offer downloads.
+
+        Rules (conservative, fast):
+        - If default dataframe exists and has numeric columns:
+          - For central tendency/variability/range: plot histogram of the first numeric column.
+          - For correlation: plot heatmap of numeric columns.
+          - For clustering: plot scatter of first two numeric columns, if available.
+        """
+        try:
+            df_default = next(iter(self.dataframes.values())) if self.dataframes else None
+            if df_default is None:
+                return
+            import numpy as np
+            numeric_cols = df_default.select_dtypes(include=[np.number]).columns.tolist()
+            if not numeric_cols:
+                return
+
+            # Map tool to visualization
+            if tool_name in {"get_central_tendency", "get_variability", "get_ranges"}:
+                # Use histogram for first numeric column
+                col = numeric_cols[0]
+                tools.plot_histogram(df_default, col)
+            elif tool_name in {"correlation_matrix", "get_variable_relations", "multicollinearity_detection"}:
+                buf = tools.plot_heatmap(df_default)
+                if buf is not None:
+                    if 'charts' not in st.session_state:
+                        st.session_state.charts = []
+                    st.session_state.charts.append({'bytes': buf.getvalue(), 'caption': 'Correlation Heatmap'})
+            elif tool_name in {"run_kmeans_clustering", "cluster_with_kmeans"} and len(numeric_cols) >= 2:
+                tools.plot_scatter(df_default, numeric_cols[0], numeric_cols[1])
+        except Exception:
+            # Fail-safe: do not break main flow if plotting fails
+            pass
 
     # =========================
     # Conversational Discovery
@@ -961,6 +1118,19 @@ class AnalysisPipeline:
     def run(self, user_query: str):
         # Etapa 1: Orquestrador cria o briefing
         st.write("1. **Orquestrador:** Analisando sua solicitação...")
+        
+        # Add error boundary for entire pipeline
+        try:
+            return self._run_internal(user_query)
+        except Exception as e:
+            st.error(f"❌ Erro no pipeline: {str(e)}")
+            st.error(f"Tipo: {type(e).__name__}")
+            with st.expander("Stack trace completo"):
+                st.code(traceback.format_exc())
+            return
+    
+    def _run_internal(self, user_query: str):
+        """Internal run method with error handling."""
         # Log the raw user message so it is always persisted, even during discovery loops
         try:
             self.conversation.append({"role": "user", "text": user_query})
@@ -1002,43 +1172,10 @@ class AnalysisPipeline:
 
         # Verificar se é pergunta simples baseada em palavras-chave
         query_lower = user_query.lower()
-        simple_mappings = {
-            "outlier": "detect_outliers",
-            "correla": "correlation_matrix",
-            "duplicata": "check_duplicates",
-            "média": "get_central_tendency",
-            "mediana": "get_central_tendency",
-            "moda": "get_central_tendency",
-            "variância": "get_variability",
-            "desvio": "get_variability",
-            "quartil": "get_ranges",
-            "percentil": "get_ranges",
-            "contagem": "get_value_counts",
-            "frequente": "get_frequent_values",
-            "temporal": "get_temporal_patterns",
-            "sazonal": "get_temporal_patterns",
-            "sazonalidade": "get_temporal_patterns",
-            "clusters": "get_clusters_summary",
-            "sentimento": "sentiment_analysis",
-            "wordcloud": "generate_wordcloud",
-            "mapa": "plot_geospatial_map",
-            "sobrevivência": "perform_survival_analysis",
-            "tópico": "topic_modeling",
-            "bayesian": "perform_bayesian_inference",
-            "perfil": "descriptive_stats",
-            # Plot intents
-            "gráfico": "plot_histogram",
-            "grafico": "plot_histogram",
-            "gráficos": "plot_histogram",
-            "graficos": "plot_histogram",
-            "histograma": "plot_histogram",
-            "boxplot": "plot_boxplot",
-            "dispersão": "plot_scatter",
-            "dispersao": "plot_scatter",
-            "scatter": "plot_scatter",
-            "plot": "plot_histogram",
-            "visualiza": "plot_histogram",
-        }
+        
+        # Use tool_registry for dynamic tool discovery
+        from tool_registry import find_best_tool_for_query
+        df_default = self.dataframes.get(next(iter(self.dataframes.keys()))) if self.dataframes else None
         # Fast path: generic queries asking for possible analyses -> suggestions only
         generic_patterns = [
             "quais análises", "quais analises", "o que posso fazer",
@@ -1051,11 +1188,9 @@ class AnalysisPipeline:
                 "user_query": user_query,
             }
         else:
-            tool_name = None
-            for keyword, tool in simple_mappings.items():
-                if keyword in query_lower:
-                    tool_name = tool
-                    break
+            # Use tool_registry to find best tool for query
+            tool_name = find_best_tool_for_query(user_query, df_default)
+            
             if tool_name:
                 briefing = {
                     "main_intent": "simple_analysis",
@@ -1063,7 +1198,8 @@ class AnalysisPipeline:
                     "user_query": user_query,
                     "main_goal": f"Responder à pergunta simples sobre {tool_name}",
                     "key_questions": [user_query],
-                    "deliverables": ["Resultado direto da ferramenta"]
+                    "deliverables": ["Resultado direto da ferramenta"],
+                    "response_mode": "direct"  # Adicionar modo direto para perguntas simples
                 }
                 # Persist intent/tool for subsequent turns
                 self._set('intent_mode', 'simple_analysis')
@@ -1107,12 +1243,143 @@ class AnalysisPipeline:
                             st.markdown(f"1. {dq[0] if dq else ''}")
                             return
                 elif not self._get('intent_mode'):
-                    # Start discovery if nothing is mapped and no prior intent
-                    self._start_discovery(initial_query=user_query)
-                    st.write("2. **Descoberta:**")
-                    dq = self._get('discovery_questions', [])
-                    st.markdown(f"1. {dq[0] if dq else ''}")
-                    return
+                    # Use LLM-based intent detection with predefined models
+                    st.write("🔍 Detectando intenção...")
+                    
+                    # Analyze DataFrame to provide context
+                    df_context = {}
+                    if df_default is not None and not df_default.empty:
+                        num_cols = df_default.select_dtypes(include='number').columns.tolist()
+                        cat_cols = df_default.select_dtypes(include=['object', 'category']).columns.tolist()
+                        has_time = any('time' in c.lower() or 'date' in c.lower() for c in df_default.columns)
+                        has_class = 'class' in df_default.columns
+                        
+                        df_context = {
+                            'n_rows': len(df_default),
+                            'n_columns': len(df_default.columns),
+                            'n_numeric': len(num_cols),
+                            'n_categorical': len(cat_cols),
+                            'has_time': has_time,
+                            'has_target': has_class,
+                            'columns': df_default.columns.tolist()[:10]  # First 10 columns
+                        }
+                    
+                    # Call LLM for intent detection
+                    data_context_str = json.dumps(df_context, indent=2) if df_context else "No dataset loaded"
+                    intent_prompt = INTENT_DETECTION_PROMPT.format(
+                        data_context=data_context_str,
+                        user_query=user_query
+                    )
+                    
+                    try:
+                        intent_response = self.orchestrator.llm.invoke(intent_prompt).content
+                        # Parse JSON response
+                        intent_data = json.loads(intent_response.strip())
+                        
+                        detected_intent = intent_data.get('detected_intent', 'AMBIGUOUS')
+                        confidence = intent_data.get('confidence', 0.5)
+                        requires_clarification = intent_data.get('requires_clarification', False)
+                        
+                        with st.expander("🔍 Detecção de Intenção", expanded=False):
+                            st.json(intent_data)
+                        
+                        # Route based on detected intent
+                        if requires_clarification and confidence < 0.7:
+                            # Ask clarification questions
+                            st.write("2. **Clarificação:**")
+                            clarification_qs = intent_data.get('clarification_questions', [])
+                            for i, q in enumerate(clarification_qs, 1):
+                                st.markdown(f"{i}. {q}")
+                            st.info("Por favor, responda às perguntas acima para eu entender melhor sua necessidade.")
+                            self._set('clarify_pending', True)
+                            self._set('pending_intent_data', intent_data)
+                            return
+                        
+                        # Map detected intent to briefing
+                        if detected_intent == 'SIMPLE_QUERY':
+                            suggested_tools = intent_data.get('suggested_tools', [])
+                            tool = suggested_tools[0] if suggested_tools else None
+                            
+                            if tool:
+                                briefing = {
+                                    "main_intent": "simple_analysis",
+                                    "tool": tool,
+                                    "user_query": user_query,
+                                    "main_goal": intent_data.get('reasoning', f"Executar {tool}"),
+                                    "deliverables": ["Resultado direto"],
+                                    "response_mode": "direct"
+                                }
+                                self._set('intent_mode', 'simple_analysis')
+                                self._set('last_tool', tool)
+                            else:
+                                # Fallback to orchestrator
+                                briefing = self.orchestrator.run(user_query)
+                                self._set('intent_mode', 'full_plan')
+                        
+                        elif detected_intent in ['EXPLORATORY_ANALYSIS', 'REPORT_GENERATION', 'PREDICTIVE_MODELING']:
+                            # Full analysis with orchestrator
+                            enriched_query = user_query + f"\n\n[IntentContext]: {json.dumps(intent_data)}"
+                            briefing = self.orchestrator.run(enriched_query)
+                            self._set('intent_mode', 'full_plan')
+                        
+                        elif detected_intent in ['VISUALIZATION_REQUEST', 'STATISTICAL_TEST']:
+                            # Multi-step but focused
+                            suggested_tools = intent_data.get('suggested_tools', [])
+                            if len(suggested_tools) == 1:
+                                # Single tool
+                                briefing = {
+                                    "main_intent": "simple_analysis",
+                                    "tool": suggested_tools[0],
+                                    "user_query": user_query,
+                                    "main_goal": intent_data.get('reasoning'),
+                                    "deliverables": ["Gráficos" if detected_intent == 'VISUALIZATION_REQUEST' else "Resultado estatístico"],
+                                    "response_mode": "direct"
+                                }
+                                self._set('intent_mode', 'simple_analysis')
+                            else:
+                                # Multiple tools
+                                briefing = self.orchestrator.run(user_query)
+                                self._set('intent_mode', 'full_plan')
+                        
+                        elif detected_intent == 'DATA_CLEANING':
+                            # Data cleaning workflow
+                            briefing = {
+                                "main_intent": "data_cleaning",
+                                "user_query": user_query,
+                                "main_goal": "Limpar e validar dados",
+                                "key_questions": ["Quais problemas de qualidade existem?", "Como corrigir?"],
+                                "deliverables": ["Dados limpos", "Relatório de qualidade"]
+                            }
+                            self._set('intent_mode', 'full_plan')
+                        
+                        else:  # AMBIGUOUS
+                            # Start discovery
+                            self._start_discovery(initial_query=user_query)
+                            st.write("2. **Descoberta:**")
+                            dq = self._get('discovery_questions', [])
+                            st.markdown(f"1. {dq[0] if dq else ''}")
+                            return
+                    
+                    except Exception as e:
+                        # Fallback to keyword-based detection
+                        st.warning(f"⚠️ Detecção de intenção via LLM falhou: {str(e)}")
+                        st.info("Usando detecção baseada em keywords...")
+                        
+                        kw_complete = [
+                            'plano', 'completo', 'profund', 'detalhado', 'multiagente', 'passos',
+                            'análise', 'analise', 'estude', 'estudar', 'avalie', 'avaliar',
+                            'relatório', 'report', 'completa', 'abrangente', 'exaustiva'
+                        ]
+                        
+                        if any(k in query_lower for k in kw_complete):
+                            briefing = self.orchestrator.run(user_query)
+                            self._set('intent_mode', 'full_plan')
+                        else:
+                            self._start_discovery(initial_query=user_query)
+                            st.write("2. **Descoberta:**")
+                            dq = self._get('discovery_questions', [])
+                            st.markdown(f"1. {dq[0] if dq else ''}")
+                            return
 
                 # If we have a recent result, assume follow-up and default to previous intent/tool
                 if self._get('last_result') and not self._get('intent_mode'):
@@ -1122,7 +1389,8 @@ class AnalysisPipeline:
                         "tool": prev_tool,
                         "user_query": user_query,
                         "main_goal": f"Executar {prev_tool} (follow-up)",
-                        "deliverables": self._get('last_deliverables') or ["Resultado direto da ferramenta"]
+                        "deliverables": self._get('last_deliverables') or ["Resultado direto da ferramenta"],
+                        "response_mode": "direct"
                     }
                 else:
                     # Conversational clarification: ask once, parse next user message
@@ -1157,6 +1425,7 @@ class AnalysisPipeline:
                                 "user_query": user_query,
                                 "main_goal": f"Executar {tool_to_use}",
                                 "deliverables": self._get('last_deliverables') or ["Resumo textual", "Gráficos"],
+                                "response_mode": "direct"
                             }
                         else:  # full_plan
                             directives = {
@@ -1194,6 +1463,7 @@ class AnalysisPipeline:
                                 "user_query": user_query,
                                 "main_goal": parsed['objective'] or f"Executar {tool}",
                                 "deliverables": parsed['deliverables'] or ["Resumo textual", "Gráficos"],
+                                "response_mode": "direct"
                             }
                             self._set('intent_mode', 'simple_analysis')
                             self._set('last_tool', tool)
@@ -1221,164 +1491,19 @@ class AnalysisPipeline:
                 st.markdown(f"- {s}")
             return
 
-        if briefing.get('main_intent') == 'simple_analysis':
-            # Resposta direta para perguntas simples sobre aspectos específicos
-            st.write("3. **Análise Direta:** Executando ferramenta e interpretando...")
-            tool_name = briefing.get('tool')
-            if tool_name in self.tool_mapping:
-                inputs = self._fill_default_inputs_for_task(tool_name, {})
-                resolved_inputs = self._resolve_inputs(inputs)
-                result = self.tool_mapping[tool_name](**resolved_inputs)
-                # Persist last result context for follow-up turns
-                self._set('last_result', {
-                    'tool': tool_name,
-                    'inputs': resolved_inputs,
-                    'result': result if isinstance(result, (dict, list, str, int, float)) else str(type(result))
-                })
-                self._set('intent_mode', 'simple_analysis')
-                self._set('last_tool', tool_name)
-                
-                # Para análises simples, mostrar apenas resultado formatado (sem LLM)
-                composed = self._compose_response(topic=user_query, result=result, style=self._get('response_style', 'Padrão'))
-                with st.chat_message("assistant"):
-                    st.markdown(composed)
-                    full_response = composed  # Usar apenas o composed, sem gerar resposta do LLM
-                    if isinstance(result, bytes):
-                        st.image(result)
-                    # If tool stored chart bytes in session, render the latest chart inline
-                    if 'charts' in st.session_state and st.session_state.charts:
-                        last_chart = st.session_state.charts[-1]
-                        if isinstance(last_chart, dict) and 'bytes' in last_chart:
-                            st.image(last_chart['bytes'], caption=last_chart.get('caption'))
-                            st.download_button(
-                                label="Baixar gráfico",
-                                data=last_chart['bytes'],
-                                file_name="chart_last.png",
-                                mime="image/png",
-                                key=f"dl_last_chart_{len(st.session_state.charts)}"
-                            )
-
-                # Persist in memory and unified chat history
-                display_question = st.session_state.get('first_user_query') or user_query
-                self.memory.append(f"**Pergunta:** {display_question}\n**Resposta:** {full_response}")
-                st.session_state['memory'] = self.memory
-                ch = st.session_state.get('chat_history', [])
-                ch.append({'role': 'assistant', 'text': composed})
-                ch.append({'role': 'assistant', 'text': full_response})
-                st.session_state['chat_history'] = ch
-
-                # Generate PDF and expose download + store report
-                charts_bytes = [result] if isinstance(result, bytes) else []
-                pdf = generate_pdf_report(
-                    title=f"Análise: {tool_name}",
-                    user_query=user_query,
-                    synthesis=synthesis,
-                    full_response=full_response,
-                    plan={"tool": tool_name},
-                    charts=charts_bytes,
-                )
-                st.download_button(
-                    label="Baixar análise em PDF",
-                    data=pdf,
-                    file_name=f"analise_{tool_name}.pdf",
-                    mime="application/pdf",
-                )
-                st.session_state['reports'].append({
-                    'file_name': f"analise_{tool_name}.pdf",
-                    'bytes': pdf,
-                    'caption': f"Análise gerada para {tool_name}"
-                })
-
-                # Register in session analyses history (no persistence outside session)
-                try:
-                    hist = st.session_state.get('analyses_history', [])
-                    hist.append({
-                        'timestamp': pd.Timestamp.utcnow().isoformat(),
-                        'mode': 'simple_analysis',
-                        'user_query': user_query,
-                        'tool': tool_name,
-                        'inputs': resolved_inputs,
-                        'summary': full_response,
-                        'pdf': pdf,
-                        'chart': (last_chart['bytes'] if 'last_chart' in locals() and isinstance(last_chart, dict) and 'bytes' in last_chart else None),
-                    })
-                    st.session_state['analyses_history'] = hist
-                except Exception:
-                    pass
-            else:
-                st.error(f"Ferramenta '{tool_name}' não encontrada.")
-            return  # Sair sem executar o fluxo completo
-
-        if briefing.get('main_intent') == 'simple_data_description':
-            # Resposta direta para perguntas simples sobre descrição de dados
-            st.write("2. **Resposta Direta:** Gerando descrição simples dos dados...")
-            if not self.dataframes:
-                full_response = "Nenhum dado foi carregado ainda. Por favor, faça upload de arquivos de dados."
-                synthesis_report = ""
-                plan = {}
-            else:
-                summaries = []
-                for name, df in self.dataframes.items():
-                    shape = df.shape
-                    columns = list(df.columns)
-                    dtypes = {col: str(dtype) for col, dtype in df.dtypes.items()}
-                    summaries.append(f"**Planilha '{name}':**\n- {shape[0]} linhas, {shape[1]} colunas.\n- Colunas: {', '.join(columns)}.\n- Tipos de dados: {', '.join([f'{k}: {v}' for k, v in dtypes.items()])}")
-                full_response = "Aqui está um resumo dos dados disponíveis:\n\n" + "\n\n".join(summaries)
-                synthesis_report = full_response
-                plan = {}
-
-            # Armazenar resposta na memória (prefer original question if discovery happened)
-            display_question = st.session_state.get('first_user_query') or user_query
-            self.memory.append(f"**Pergunta:** {display_question}\n**Resposta:** {full_response}")
-            st.session_state['memory'] = self.memory
-            # Append to unified chat history (assistant)
-            ch = st.session_state.get('chat_history', [])
-            ch.append({'role': 'assistant', 'text': full_response})
-            st.session_state['chat_history'] = ch
-
-            # Gerar PDF simples
-            charts_bytes = []
-            pdf = generate_pdf_report(
-                title="Resumo de Dados",
-                user_query=user_query,
-                synthesis=synthesis_report,
-                full_response=full_response,
-                plan=plan,
-                charts=charts_bytes,
-            )
-            st.download_button(
-                label="Baixar resumo em PDF",
-                data=pdf,
-                file_name="resumo_dados.pdf",
-                mime="application/pdf",
-            )
-            # Store report for later download in history
-            st.session_state['reports'].append({
-                'file_name': "resumo_dados.pdf",
-                'bytes': pdf,
-                'caption': "Resumo de Dados"
-            })
-
-            # Exibir resposta diretamente
-            with st.chat_message("assistant"):
-                st.markdown(full_response)
-            return  # Sair sem executar o fluxo completo
-
         # Etapa 2: Team Leader cria o plano (com cache opcional)
         st.write("2. **Líder de Equipe:** Criando plano de execução...")
-        # Compute a cache key
+        # Compute a cache key based on query content and intent
         plan_cache = st.session_state.get('plan_cache', {})
         cache_key = None
         try:
-            if briefing.get('main_intent') == 'simple_analysis' and briefing.get('tool'):
-                cache_key = ("simple_analysis", briefing.get('tool'))
-            else:
-                # Use schema proxy by default df columns (first 20 cols for key size limits)
-                df_default = next(iter(self.dataframes.values())) if self.dataframes else None
-                cols_key = tuple(list(df_default.columns[:20])) if isinstance(df_default, pd.DataFrame) else tuple()
-                cache_key = (briefing.get('main_intent'), cols_key)
+            # Create unique cache key based on query + intent + response_mode
+            query_hash = hash(user_query.lower().strip())
+            intent = briefing.get('main_intent', 'unknown')
+            response_mode = briefing.get('response_mode', 'complete')
+            cache_key = (intent, response_mode, query_hash)
         except Exception:
-            cache_key = (briefing.get('main_intent'),)
+            cache_key = ("full_plan",)
 
         if st.session_state.get('reuse_success_plan') and cache_key in plan_cache:
             st.info("Usando plano reaproveitado do cache de sucesso.")
@@ -1606,6 +1731,18 @@ class AnalysisPipeline:
         st.session_state.charts = []
         st.session_state['execution_log'] = []
         
+        # Validate tools before execution
+        from tool_registry import validate_tool_for_dataframe
+        df_for_validation = self.dataframes.get(next(iter(self.dataframes.keys()))) if self.dataframes else None
+        
+        if df_for_validation is not None:
+            for task in plan.get('execution_plan', []):
+                tool_name = task.get('tool_to_use')
+                if tool_name:
+                    can_execute, reason = validate_tool_for_dataframe(tool_name, df_for_validation)
+                    if not can_execute:
+                        st.warning(f"⚠️ Tarefa {task.get('task_id')}: {tool_name} - {reason}")
+        
         # Execute plan using ExecutionEngine
         execution_result = self.execution_engine.execute_plan(
             plan=plan,
@@ -1668,10 +1805,19 @@ class AnalysisPipeline:
         memory_context = "\n".join(memory_context_items)
 
         st.write("5. **Analista de Negócios:** Gerando insights e resposta final...")
+        # Obter o modo de resposta do briefing quando disponível
+        response_mode = 'complete'
+        try:
+            # Tentar extrair do briefing se estiver disponível no escopo
+            if 'briefing' in locals() and isinstance(briefing, dict):
+                response_mode = briefing.get('response_mode', 'complete')
+        except:
+            pass
         final_response_stream = self.agents["DataAnalystBusinessAgent"].generate_final_response(
             synthesis_report, 
             memory_context, 
-            tools_used=tools_used
+            tools_used=tools_used,
+            response_mode=response_mode
         )
         full_response = stream_response_to_chat(final_response_stream)
 
@@ -1679,6 +1825,14 @@ class AnalysisPipeline:
         display_question = st.session_state.get('first_user_query') or user_query
         self.memory.append(f"**Pergunta:** {display_question}\n**Resposta:** {full_response}")
         st.session_state['memory'] = self.memory
+
+        # Exibir resposta final e persistir no histórico do chat
+        ch = st.session_state.get('chat_history', [])
+        ch.append({'role': 'assistant', 'text': full_response})
+        st.session_state['chat_history'] = ch
+        # Mostrar imediatamente nesta execução (histórico cuida das próximas renderizações)
+        with st.chat_message("assistant"):
+            st.markdown(full_response)
 
         # Botão para baixar relatório em PDF (ABNT + Pirâmide de Minto) - apenas se solicitado
         if 'relatório' in user_query.lower() or 'report' in user_query.lower():
@@ -1809,12 +1963,7 @@ def main():
         except Exception as e:
             st.error(f"Falha ao inicializar LLM: {e}")
 
-        # Controls to optimize experience under high demand
-        st.subheader("Execução e Desempenho")
-        max_parallel = st.slider("Tarefas paralelas (máx)", 1, 8, value=st.session_state.get('max_parallel_tasks', 4))
-        st.session_state['max_parallel_tasks'] = max_parallel
-        auto_split = st.checkbox("Auto-dividir plano quando demanda alta (respeitar RPM)", value=st.session_state.get('auto_split', True))
-        st.session_state['auto_split'] = auto_split
+        # Controls    # (Preferências de execução removidas para garantir uso consistente do pipeline multiagente)
         save_exec_log = st.checkbox("Salvar log de execução (JSON)", value=st.session_state.get('save_exec_log', False))
         st.session_state['save_exec_log'] = save_exec_log
         reuse_success_plan = st.checkbox("Reutilizar plano de sucesso quando disponível", value=st.session_state.get('reuse_success_plan', True))
@@ -1835,7 +1984,7 @@ def main():
                     if remaining <= 0:
                         st.session_state.pop('retry_at', None)
                         st.session_state['api_status'] = {'ok': True}
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.info("Ainda aguardando janela de quota.")
             else:
@@ -2049,7 +2198,7 @@ def main():
                 if st.button("Limpar histórico"):
                     st.session_state['analyses_history'] = []
                     st.success("Histórico limpo.")
-                    st.experimental_rerun()
+                    st.rerun()
 
                 # Show latest first
                 for idx, item in enumerate(reversed(filtered), start=1):
@@ -2083,7 +2232,7 @@ def main():
                                 'inputs': item.get('inputs') or {},
                                 'user_query': item.get('user_query') or f"Replay: {item.get('tool')}"
                             }
-                            st.experimental_rerun()
+                            st.rerun()
 
         # Preview of default DataFrame: header, 4 rows, types and potential keys
         with st.expander("Preview of Default DataFrame (header, 4 rows, types and potential keys)"):

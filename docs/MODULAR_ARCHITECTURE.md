@@ -22,8 +22,8 @@ The Autonomous Data Consulting system has been fully migrated to a modular archi
   - `DataScientistAgent`: Machine learning
 
 ### 3. Tool Layer
-- **Package**: `tools/` (21 modules, 122 functions)
-- **Registry**: `tool_registry.py` (81 registered tools)
+- **Package**: `tools/` (21 modules, 211 functions - 125 exported)
+- **Registry**: `tool_registry.py` (86 registered tools)
 - **Categories**:
   - Data Profiling & Quality
   - Statistical Analysis
@@ -56,7 +56,7 @@ The Autonomous Data Consulting system has been fully migrated to a modular archi
 
 ```
 tools/
-├── __init__.py                 # Central export hub (122 functions)
+├── __init__.py                 # Central export hub (125 exported functions)
 │
 ├── Core Analysis
 │   ├── data_profiling.py      # 15 functions
@@ -246,7 +246,7 @@ class ToolMetadata:
 - Edge case coverage
 
 ### Integration Tests
-- `test_tools_mapping.py`: Validates all 81 registered tools
+- `test_tools_mapping.py`: Validates all 86 registered tools
 - Tests default parameter generation
 - Ensures all tools execute without errors
 
@@ -270,7 +270,7 @@ class ToolMetadata:
 ### From Monolithic to Modular
 
 **Before:**
-- Single `tools.py` file (2200 lines, 122 functions)
+- Single `tools.py` file (2200 lines, 122 functions initially)
 - No organization
 - Difficult to maintain
 - No test coverage
@@ -278,8 +278,8 @@ class ToolMetadata:
 **After:**
 - 21 specialized modules
 - Clear categorization
-- 122 functions properly exported
-- 81 tools registered with metadata
+- 211 total functions (125 exported)
+- 86 tools registered with metadata
 - 23 tests with 100% pass rate
 - Comprehensive documentation
 
